@@ -14,7 +14,6 @@ from src.utils import PATH
 def create_pinn_hdf5_dataset():
     """
     Process 24 monthly MOZART4 NetCDF files into a single HDF5 file
-    optimized for Physics-Informed Neural Network analysis.
     """
     start_time = time.time()
     print("Starting microplastic data processing...")
