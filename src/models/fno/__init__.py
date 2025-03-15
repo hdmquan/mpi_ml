@@ -1,5 +1,5 @@
-from .fno_model import FNOModel
-from .pinn_model import PINNModel
+from .core import FNOModel
+from .pinn import PINNModel
 
 
 __all__ = ["FNOModel", "PINNModel"]

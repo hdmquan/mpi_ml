@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from .fno import FNOModel
+from .core import FNOModel
 import numpy as np
 from src.utils import set_seed
 
@@ -157,8 +157,15 @@ class PINNModel(pl.LightningModule):
         boundary_loss = torch.mean(y_pred[:, :, 0, :] ** 2)
 
         # Mass conservation loss
-        mass_pred = torch.sum(y_pred * cell_area, dim=(-2, -1))
-        mass_true = torch.sum(y_true * cell_area, dim=(-2, -1))
+        # The issue is here - cell_area needs to be properly broadcast to match y_pred's dimensions
+        # cell_area shape: [batch_size, height, width]
+        # y_pred shape: [batch_size, out_channels, height, width]
+
+        # Expand cell_area to match y_pred's dimensions
+        cell_area_expanded = cell_area.unsqueeze(1).expand_as(y_pred)
+
+        mass_pred = torch.sum(y_pred * cell_area_expanded, dim=(-2, -1))
+        mass_true = torch.sum(y_true * cell_area_expanded, dim=(-2, -1))
 
         mass_conservation_loss = torch.mean((mass_pred - mass_true) ** 2)
 
