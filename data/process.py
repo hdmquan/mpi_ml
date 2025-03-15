@@ -11,7 +11,7 @@ from tqdm import tqdm
 from src.utils import PATH
 
 
-def create_pinn_hdf5_dataset():
+def create_dataset():
     """
     Process 24 monthly MOZART4 NetCDF files into a single HDF5 file
     """
@@ -79,6 +79,7 @@ def create_pinn_hdf5_dataset():
             if var.startswith("Plast") and var.endswith("WETDEP_FLUX_avrg")
         ]
 
+        # Pressure, wind, temperature, humidity, tropopause
         met_vars = ["PS", "U", "V", "T", "Q", "TROPLEV"]
 
         global_attrs = {attr: getattr(nc, attr) for attr in nc.ncattrs()}
@@ -488,58 +489,84 @@ def create_pinn_hdf5_dataset():
         coords_grp.create_dataset("month", data=month_data)
         coords_grp.create_dataset("year", data=year_data)
 
-        # Calculate and store settling velocities based on Stokes' Law
-        gravity = 9.81  # m/s²
-        air_viscosity = 1.8e-5  # kg/(m·s)
-        particle_density = 1000.0  # kg/m³
-        air_density = 1.225  # kg/m³
-
+        # Add settling velocities based on empirical data from the table
         # Create datasets for settling velocities
         small_grp.create_dataset(
             "settling_velocity",
-            shape=(len(lev), len(small_particles)),
+            shape=(len(small_particles),),
             dtype=np.float32,
         )
         large_grp.create_dataset(
             "settling_velocity",
-            shape=(len(lev), len(large_particles)),
+            shape=(len(large_particles),),
+            dtype=np.float32,
+        )
+        # Also store sphere settling velocities for large particles
+        large_grp.create_dataset(
+            "sphere_settling_velocity",
+            shape=(len(large_particles),),
             dtype=np.float32,
         )
 
-        # Calculate settling velocities for each particle size and level
-        for i, level in enumerate(lev):
-            # Estimate air density at this level (simplified)
-            level_air_density = air_density * np.exp(
-                -level / 8.5
-            )  # Scale height of 8.5 km
+        # Empirical settling velocities from the table (in cm/s)
+        # Note from the paper: particle larger than 20μm tends to be fiber
+        # Elongated particles - fiber, have lower settling velocities
+        # They tested with spherical larger particles and result are very different
+        sphere_settling = [0.00097, 0.0087, 0.097, 0.39, 3.61, 14.39]
+        fiber_settling = [None, None, None, None, 2.7, 4.98]
 
-            # Calculate for small particles (spherical)
-            for j, var in enumerate(small_particles):
-                # Extract size from variable name
-                size_key = var.split("_")[0]  # e.g., "Plast01"
-                diameter = particle_sizes[size_key] * 1e-6  # Convert μm to m
+        # Add metadata about settling velocities
+        mp_grp.attrs["settling_velocity_units"] = "cm/s"
+        mp_grp.attrs["settling_velocity_description"] = (
+            "Terminal settling velocity for particles in air"
+        )
 
-                # Stokes' Law for settling velocity
-                v_settle = (
-                    diameter**2 * (particle_density - level_air_density) * gravity
-                ) / (18 * air_viscosity)
-                small_grp["settling_velocity"][i, j] = v_settle
+        # Set values for small particles (use sphere values)
+        for j, var in enumerate(small_particles):
+            # Extract size from variable name
+            size_key = var.split("_")[0]  # e.g., "Plast01"
+            small_grp["settling_velocity"][j] = sphere_settling[j]
+            small_grp[var].attrs["settling_velocity_cm_s"] = sphere_settling[j]
+            small_grp[var].attrs["diameter_um"] = particle_sizes[size_key]
+            small_grp[var].attrs["shape"] = "sphere"
 
-            # Calculate for large particles (fiber-like)
-            for j, var in enumerate(large_particles):
-                # Extract size from variable name
-                size_key = var.split("_")[0]  # e.g., "Plast05"
-                diameter = particle_sizes[size_key] * 1e-6  # Convert μm to m
+        # Set values for large particles (use fiber values)
+        for j, var in enumerate(large_particles):
+            # Extract size from variable name
+            size_key = var.split("_")[0]  # e.g., "Plast05"
+            idx = j + len(small_particles)
+            large_grp["settling_velocity"][j] = fiber_settling[idx]
+            large_grp["sphere_settling_velocity"][j] = sphere_settling[idx]
+            large_grp[var].attrs["settling_velocity_cm_s"] = fiber_settling[idx]
+            large_grp[var].attrs["sphere_settling_velocity_cm_s"] = sphere_settling[idx]
+            large_grp[var].attrs["diameter_um"] = particle_sizes[size_key]
+            large_grp[var].attrs["shape"] = "fiber"
 
-                # Modified settling velocity for non-spherical particles
-                # Using a shape factor of 0.7 for fibers
-                shape_factor = 0.7
-                v_settle = (
-                    shape_factor
-                    * (diameter**2 * (particle_density - level_air_density) * gravity)
-                    / (18 * air_viscosity)
-                )
-                large_grp["settling_velocity"][i, j] = v_settle
+        # Create settling velocity parameters as in the table
+        # Parameter a(D) and b(D) from table
+        parameter_a = [7.1e-8, 1.1e-7, 9.7e-5, 1.7e-4, 2.8e-4, 3.9e-4]
+        parameter_b = [6.9e-7, 1.2e-6, 1.8e-3, 3.6e-3, 5.5e-3, 6.4e-3]
+
+        # Store these parameters as metadata
+        deposition_params = mp_grp.create_group("deposition_parameters")
+        deposition_params.create_dataset("parameter_a", data=parameter_a)
+        deposition_params.create_dataset("parameter_b", data=parameter_b)
+
+        # Add attributes to explain these parameters
+        deposition_params.attrs["parameter_a_description"] = (
+            "Deposition parameter a(D) for each particle size"
+        )
+        deposition_params.attrs["parameter_b_description"] = (
+            "Deposition parameter b(D) for each particle size"
+        )
+        deposition_params.attrs["particle_diameters_um"] = list(particle_sizes.values())
+
+        # Add Cunningham correction factors
+        Cc_values = [1.326, 1.082, 1.032, 1.016, 1.008, 1.003]
+        deposition_params.create_dataset("Cc", data=Cc_values)
+        deposition_params.attrs["Cc_description"] = (
+            "Cunningham correction factor for each particle size"
+        )
 
         # Calculate statistics for normalization
         # For microplastic mass mixing ratios
@@ -646,4 +673,4 @@ def create_pinn_hdf5_dataset():
 
 
 if __name__ == "__main__":
-    create_pinn_hdf5_dataset()
+    create_dataset()
