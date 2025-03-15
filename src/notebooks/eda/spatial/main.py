@@ -5,7 +5,7 @@ from plotly.subplots import make_subplots
 import numpy as np
 
 from src.utils import PATH
-from src.utils.data.loader import MPIDataLoader, MPIDataset
+from src.data.loader import MPIDataLoader, MPIDataset
 
 # %% Load Data
 loader = MPIDataLoader(PATH.PROCESSED_DATA / "mpidata.h5")
