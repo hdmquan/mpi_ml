@@ -12,8 +12,10 @@ class PATH:
     SRC = ROOT / "src"
     DATA = ROOT / "data"
     RESULTS = ROOT / "results"
+    CHECKPOINTS = ROOT / "checkpoints"
     FIGURES = ROOT / "figures"
     WEIGHTS = ROOT / "weights"
+    LOGS = ROOT / "logs"
 
     MODELS = SRC / "models"
     DATASETS = SRC / "datasets"
@@ -33,3 +35,9 @@ def set_seed(seed: int = 37) -> None:
     torch.backends.cudnn.benchmark = False
 
     os.environ["PYTHONHASHSEED"] = str(seed)
+
+
+if __name__ == "__main__":
+    for path in PATH.__dict__.values():
+        if not os.path.exists(path):
+            os.makedirs(path)
