@@ -76,7 +76,6 @@ class PINNModel(pl.LightningModule):
         return self.fno_model(x, coords)
 
     def compute_physics_loss(self, x, y_pred, y_true, cell_area, dt=1.0):
-        # FIXME: How did the plastic emission and deposition actually modeled in the paper?
         """
         The physics includes:
 
@@ -153,8 +152,10 @@ class PINNModel(pl.LightningModule):
 
         conservation_loss = torch.mean(conservation_residual**2)
 
-        # No plastic at domain edges (simplified)
+        # Consider improving boundary condition enforcement
+        # Currently only penalizes the southern boundary
         boundary_loss = torch.mean(y_pred[:, :, 0, :] ** 2)
+        # Consider adding penalties for other boundaries if needed
 
         # Mass conservation loss
         # The issue is here - cell_area needs to be properly broadcast to match y_pred's dimensions

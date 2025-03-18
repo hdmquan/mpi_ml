@@ -1,3 +1,4 @@
+# %%
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -11,19 +12,17 @@ from src.data.module import MicroplasticDataModule
 from src.models.fno.pinn import PINNModel
 from src.utils import set_seed, PATH
 
-# Set random seed for reproducibility
 set_seed()
 
-MAX_EPOCHS = 100
+MAX_EPOCHS = 200
 
-# Create directories for saving results
 results_dir = PATH.RESULTS / "pinn_training"
 os.makedirs(results_dir, exist_ok=True)
 os.makedirs(results_dir / "plots", exist_ok=True)
 os.makedirs(results_dir / "gradients", exist_ok=True)
 os.makedirs(results_dir / "predictions", exist_ok=True)
 
-# Lists to store metrics for plotting
+# %%
 train_losses = []
 val_losses = []
 val_epochs = []  # Track which epochs have validation data
@@ -58,7 +57,6 @@ print(f"Input channels: {in_channels}")
 print(f"Output channels: {out_channels}")
 
 
-# Custom callback to track gradients and losses
 class MetricsCallback(pl.Callback):
     def __init__(self):
         super().__init__()
@@ -189,21 +187,19 @@ trainer = pl.Trainer(
     check_val_every_n_epoch=10,  # Validate every 10 epochs
 )
 
-# Train the model
+# %% Train the model
 print(f"Starting training for {MAX_EPOCHS} epochs...")
 trainer.fit(model, data_module)
 
-# Evaluate on validation set
+# %% Evaluate on validation set
 print("Evaluating on validation set...")
 val_results = trainer.validate(model, data_module)
 print(f"Final validation results: {val_results}")
 
-# Plot training and validation losses
+# %% Plot training and validation losses
 plt.figure(figsize=(12, 8))
 plt.plot(epochs, train_losses, "b-", label="Training Loss")
-plt.plot(
-    val_epochs, val_losses, "r-", label="Validation Loss"
-)  # Fixed: use val_epochs instead
+plt.plot(val_epochs, val_losses, "r-", label="Validation Loss")
 plt.plot(epochs, physics_losses, "g-", label="Physics Loss")
 plt.plot(epochs, data_losses, "y-", label="Data Loss")
 plt.xlabel("Epoch")
@@ -229,11 +225,11 @@ plt.tight_layout()
 plt.savefig(results_dir / "gradients" / "parameter_gradients.png", dpi=150)
 plt.close()
 
-# Also create a plot for the mass conservation loss which might be very large
+# Fix the mass conservation loss plot
 plt.figure(figsize=(10, 6))
-plt.semilogy(
-    val_epochs, [result["val_mass_conservation_loss"] for result in val_results], "r-"
-)
+# val_results is a list with one dictionary, so we need to access the first element
+mass_conservation_loss = val_results[0]["val_mass_conservation_loss"]
+plt.semilogy(val_epochs[-1], mass_conservation_loss, "ro")  # Plot single point
 plt.xlabel("Epoch")
 plt.ylabel("Mass Conservation Loss (log scale)")
 plt.title("Mass Conservation Loss")
@@ -258,3 +254,5 @@ np.savez(
 )
 
 print("Training completed!")
+
+# %%

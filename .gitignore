@@ -1,4 +1,6 @@
 logs/
+results/
+/checkpoints/
 
 *.zip
 *.tar
