@@ -77,193 +77,234 @@ class PINNModel(pl.LightningModule):
 
     def compute_physics_loss(self, x, y_pred, y_true, cell_area, dt=1.0):
         """
-        The physics includes:
-
-        - Advection: Wind pushing plastic around (div(u * y))
-        - Settling: Gravity pulling plastic down (w_s * y)
-        - Conservation: Plastic doesn't magically appear/disappear, or is it? 🤨
-        - Boundary conditions: No plastic escaping the domain
-        - Mass conservation: Total plastic should remain constant, kind of?
+        Compute physics-informed losses based on conservation laws and transport equations.
 
         Args:
-            x: [batch_size, in_channels, height, width]
-            y_pred: [batch_size, out_channels, height, width]
-            y_true: [batch_size, out_channels, height, width]
-            cell_area: [batch_size, height, width]
-            dt: (default: 1.0)
+            x: Input features [batch_size, in_channels, height, width]
+            y_pred: Predicted mass mixing ratio [batch_size, out_channels, height, width]
+            y_true: Ground truth mass mixing ratio [batch_size, out_channels, height, width]
+            cell_area: Area of each grid cell [height, width]
+            dt: Time step between consecutive frames
 
         Returns:
-            Dictionary of physics-informed loss terms for each size bin
+            Dictionary of individual physics losses and their weighted sum
         """
+        batch_size, n_particles, height, width = y_pred.shape
         device = y_pred.device
 
-        # Extract relevant variables from input tensor
-        # ps = x[:, 0:1]  # Surface pressure - the weight of the atmosphere
-        u = x[:, 1:2]  # Zonal wind (x) - eastward/westward flow
-        v = x[:, 2:3]  # Meridional wind (y) - northward/southward flow
-        # t = x[:, 3:4]  # Temperature - how spicy the air is
-        # q = x[:, 4:5]  # Specific humidity - how wet the air is
-        # trop_lev = x[:, 5:6]  # Tropopause level - ceiling of the weather
+        # Extract relevant input fields (assuming standard order)
+        ps = x[:, 0:1]  # Surface pressure
+        u = x[:, 1:2]  # Eastward wind
+        v = x[:, 2:3]  # Northward wind
+        # w = x[:, 3:4]  # Vertical velocity (if available)
+        emissions = x[:, -1:]  # Assuming emissions is the last channel
 
-        # Extract emissions - the plastic source terms
-        emissions = x[:, -self.hparams.out_channels :]
+        # Reshaping settling velocities for broadcasting
+        # [6] -> [batch, 6, height, width]
+        v_s = (
+            self.settling_vel.view(1, -1, 1, 1)
+            .expand(batch_size, -1, height, width)
+            .to(device)
+        )
 
-        # Calculate spatial gradients for each plastic size bin
-        dx_list = []
-        dy_list = []
+        losses = {}
 
-        for i in range(self.hparams.out_channels):
-            conc = y_pred[:, [i]]
+        # 1. Mass Conservation Loss
+        # L_mass = (∫∫∫ ρ·MMR dV + ∫∫ (DryDep + WetDep) dA - ∫∫ Emissions dA)²
+        # Simplified: For now, we check if the total mass remains constant minus emissions
+        total_mass_t0 = (y_true[:, :, :, :] * cell_area[None, None, :, :]).sum(
+            dim=(-2, -1)
+        )
+        total_mass_t1 = (y_pred[:, :, :, :] * cell_area[None, None, :, :]).sum(
+            dim=(-2, -1)
+        )
+        total_emissions = (emissions * cell_area[None, None, :, :]).sum(dim=(-2, -1))
 
-            # Calculate x-gradient with central differencing
-            dx = torch.zeros_like(conc)
-            dx[..., 1:-1] = (conc[..., 2:] - conc[..., :-2]) / 2
+        # Simplified mass conservation: change in mass should equal emissions
+        mass_conservation_error = total_mass_t1 - total_mass_t0 - total_emissions
+        losses["mass_conservation"] = torch.mean(mass_conservation_error**2)
 
-            # Handle periodic boundary in longitude (east-west wraps around)
-            dx[..., 0] = (conc[..., 1] - conc[..., -1]) / 2
-            dx[..., -1] = (conc[..., 0] - conc[..., -2]) / 2
+        # 2. Transport Equation Loss
+        # L_transport = ∫∫∫ (∂C/∂t + u·∂C/∂x + v·∂C/∂y + w·∂C/∂z - K_h∇²C - K_v∂²C/∂z² - S)² dV dt
 
-            # Calculate y-gradient with central differencing
-            dy = torch.zeros_like(conc)
-            dy[..., 1:-1, :] = (conc[..., 2:, :] - conc[..., :-2, :]) / 2
+        # Compute gradients using finite differences
+        # Note: requires spatial coordinates to be evenly spaced for accurate derivatives
+        # We'll use central differences for interior points
 
-            # Forward diff at south pole
-            dy[..., 0, :] = conc[..., 1, :] - conc[..., 0, :]
+        # Temporal derivative (forward difference)
+        dC_dt = (y_pred - y_true) / dt
 
-            # Backward diff at north pole
-            dy[..., -1, :] = conc[..., -1, :] - conc[..., -2, :]
+        # Spatial derivatives (central differences)
+        # Pad for boundary conditions (periodic assumed for simplicity)
+        y_pad = F.pad(y_pred, (1, 1, 1, 1), mode="circular")
 
-            dx_list.append(dx)
-            dy_list.append(dy)
+        # Assuming dx and dy are grid spacings (could be passed as parameters)
+        # For simplicity, using normalized grid spacing
+        dx, dy = 1.0, 1.0
 
-        dx = torch.cat(dx_list, dim=1)
-        dy = torch.cat(dy_list, dim=1)
+        # Compute x-derivatives using central differences
+        dC_dx = (y_pad[:, :, 1:-1, 2:] - y_pad[:, :, 1:-1, :-2]) / (2 * dx)
 
-        advection = u * dx + v * dy
+        # Compute y-derivatives using central differences
+        dC_dy = (y_pad[:, :, 2:, 1:-1] - y_pad[:, :, :-2, 1:-1]) / (2 * dy)
 
-        settling_vel = self.settling_vel.to(device).view(1, -1, 1, 1)
+        # Simplified transport residual without diffusion terms
+        # (∂C/∂t + u·∂C/∂x + v·∂C/∂y - S)
+        transport_residual = dC_dt + u * dC_dx + v * dC_dy - emissions
 
-        settling_term = settling_vel * y_pred
+        # Compute transport loss
+        losses["transport"] = torch.mean(transport_residual**2)
 
-        # Pre-write in case I decided to add time-dependence
-        time_derivative = (y_pred - y_true) / dt
+        # 3. Settling Velocity Loss
+        # L_settling = ∫∫∫ (∂C/∂t + v_s·∂C/∂z)² dV dt
+        # Note: This is simplified without vertical info, but we can penalize based on settling
+        # Different particle sizes have different settling behaviors
 
-        conservation_residual = time_derivative + advection - emissions + settling_term
+        # Simple settling loss (approximation without vertical dimension)
+        # Higher settling velocity should lead to faster deposition
+        settling_effect = v_s * y_pred  # Proxy for settling effect
 
-        conservation_loss = torch.mean(conservation_residual**2)
+        # The settling loss ensures particles with higher settling velocity have stronger
+        # downward tendency (would need vertical dimension for full implementation)
+        losses["settling"] = torch.mean((dC_dt + settling_effect) ** 2)
 
-        # Consider improving boundary condition enforcement
-        # Currently only penalizes the southern boundary
-        boundary_loss = torch.mean(y_pred[:, :, 0, :] ** 2)
-        # Consider adding penalties for other boundaries if needed
+        # 4. Boundary Layer Interaction Loss
+        # L_boundary = ∫∫ (v_s·C_surface - (DryDep + Emissions))² dA dt
+        # Simplified since we don't have explicit deposition in this prediction
+        boundary_residual = v_s * y_pred - emissions
+        losses["boundary"] = torch.mean(boundary_residual**2)
 
-        # Mass conservation loss
-        # The issue is here - cell_area needs to be properly broadcast to match y_pred's dimensions
-        # cell_area shape: [batch_size, height, width]
-        # y_pred shape: [batch_size, out_channels, height, width]
+        # 5. Smoothness Regularization
+        # L_smooth = λ_s ∫∫∫ |∇C|² dV
+        # Gradient magnitude squared
+        gradient_magnitude_squared = dC_dx**2 + dC_dy**2
+        losses["smoothness"] = torch.mean(gradient_magnitude_squared)
 
-        # Expand cell_area to match y_pred's dimensions
-        cell_area_expanded = cell_area.unsqueeze(1).expand_as(y_pred)
+        # Combine all physics losses with weights
+        total_physics_loss = (
+            self.hparams.conservation_weight * losses["mass_conservation"]
+            + self.hparams.physics_weight * losses["transport"]
+            + self.hparams.physics_weight * losses["settling"]
+            + self.hparams.boundary_weight * losses["boundary"]
+            + 0.01 * losses["smoothness"]  # Small weight for smoothness
+        )
 
-        mass_pred = torch.sum(y_pred * cell_area_expanded, dim=(-2, -1))
-        mass_true = torch.sum(y_true * cell_area_expanded, dim=(-2, -1))
+        losses["total_physics"] = total_physics_loss
+        return losses
 
-        mass_conservation_loss = torch.mean((mass_pred - mass_true) ** 2)
-
-        return {
-            "conservation_loss": conservation_loss,
-            "boundary_loss": boundary_loss,
-            "mass_conservation_loss": mass_conservation_loss,
-        }
-
-    def compute_nn_loss(self, x, y_pred, y_true, cell_area):
+    def compute_loss(self, x, y_pred, y_true, cell_area):
         """
-        Shapes:
-            x: [batch_size, in_channels, height, width]
-            y_pred: [batch_size, out_channels, height, width]
-            y_true: [batch_size, out_channels, height, width]
-            cell_area: [batch_size, height, width]
+        Compute the total loss combining data fidelity (MSE) and physics-informed losses.
+
+        Args:
+            x: Input features [batch_size, in_channels, height, width]
+            y_pred: Predicted mass mixing ratio [batch_size, out_channels, height, width]
+            y_true: Ground truth mass mixing ratio [batch_size, out_channels, height, width]
+            cell_area: Area of each grid cell [height, width]
 
         Returns:
-            Tuple of (physics_losses, data_loss, total_loss)
+            Dictionary of losses including the total loss
         """
-        pi_losses = self.compute_physics_loss(x, y_pred, y_true, cell_area)
+        # Data fidelity loss (MSE)
+        mse_loss = F.mse_loss(y_pred, y_true)
 
-        nn_losses = F.mse_loss(y_pred, y_true)
+        # Physics-informed losses
+        physics_losses = self.compute_physics_loss(x, y_pred, y_true, cell_area)
 
-        pinn_losses = (
-            nn_losses
-            + self.hparams.physics_weight * pi_losses["conservation_loss"]
-            + self.hparams.boundary_weight * pi_losses["boundary_loss"]
-            + self.hparams.conservation_weight * pi_losses["mass_conservation_loss"]
-        )
+        # Combine losses
+        total_loss = mse_loss + physics_losses["total_physics"]
 
-        return pi_losses, nn_losses, pinn_losses
+        # Create loss dictionary
+        losses = {
+            "mse": mse_loss,
+            "total_loss": total_loss,
+            **physics_losses,  # Include all individual physics losses
+        }
+
+        return losses
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
-        x = batch["inputs"]
-        y_true = batch["targets"]
-        coords = batch["coords"]
-        cell_area = batch["cell_area"]
+        """
+        Perform a training step.
 
-        y_pred = self(x, coords)
+        Args:
+            batch: Batch of data containing inputs, targets, and cell areas
+            batch_idx: Index of the batch
 
-        pi_losses, nn_losses, pinn_losses = self.compute_nn_loss(
-            x, y_pred, y_true, cell_area
-        )
+        Returns:
+            Total loss for backpropagation
+        """
+        x, y_true, cell_area = batch
 
-        self.log("train_data_loss", nn_losses)
-        self.log("train_conservation_loss", pi_losses["conservation_loss"])
-        self.log("train_boundary_loss", pi_losses["boundary_loss"])
-        self.log("train_mass_conservation_loss", pi_losses["mass_conservation_loss"])
-        self.log("train_total_loss", pinn_losses)
+        # Forward pass
+        y_pred = self(x)
 
-        return pinn_losses
+        # Compute losses
+        losses = self.compute_loss(x, y_pred, y_true, cell_area)
+
+        # Log all losses
+        for name, value in losses.items():
+            self.log(f"train_{name}", value, prog_bar=name == "total_loss")
+
+        return losses["total_loss"]
 
     def validation_step(self, batch, batch_idx) -> torch.Tensor:
+        """
+        Perform a validation step.
 
-        x = batch["inputs"]
-        y_true = batch["targets"]
-        coords = batch["coords"]
-        cell_area = batch["cell_area"]
+        Args:
+            batch: Batch of data containing inputs, targets, and cell areas
+            batch_idx: Index of the batch
 
-        y_pred = self(x, coords)
+        Returns:
+            Total validation loss
+        """
+        x, y_true, cell_area = batch
 
-        pi_losses, nn_losses, pinn_losses = self.compute_nn_loss(
-            x, y_pred, y_true, cell_area
-        )
+        # Forward pass
+        y_pred = self(x)
 
-        self.log("val_data_loss", nn_losses)
-        self.log("val_conservation_loss", pi_losses["conservation_loss"])
-        self.log("val_boundary_loss", pi_losses["boundary_loss"])
-        self.log("val_mass_conservation_loss", pi_losses["mass_conservation_loss"])
-        self.log("val_total_loss", pinn_losses)
+        # Compute losses
+        losses = self.compute_loss(x, y_pred, y_true, cell_area)
 
-        return pinn_losses
+        # Log all losses
+        for name, value in losses.items():
+            self.log(f"val_{name}", value, prog_bar=name == "total_loss")
+
+        return losses["total_loss"]
 
     def test_step(self, batch, batch_idx) -> torch.Tensor:
+        """
+        Perform a test step.
 
-        x = batch["inputs"]
-        y_true = batch["targets"]
-        coords = batch["coords"]
-        cell_area = batch["cell_area"]
+        Args:
+            batch: Batch of data containing inputs, targets, and cell areas
+            batch_idx: Index of the batch
 
-        y_pred = self(x, coords)
+        Returns:
+            Total test loss
+        """
+        x, y_true, cell_area = batch
 
-        pi_losses, nn_losses, pinn_losses = self.compute_nn_loss(
-            x, y_pred, y_true, cell_area
-        )
+        # Forward pass
+        y_pred = self(x)
 
-        self.log("test_data_loss", nn_losses)
-        self.log("test_conservation_loss", pi_losses["conservation_loss"])
-        self.log("test_boundary_loss", pi_losses["boundary_loss"])
-        self.log("test_mass_conservation_loss", pi_losses["mass_conservation_loss"])
-        self.log("test_total_loss", pinn_losses)
+        # Compute losses
+        losses = self.compute_loss(x, y_pred, y_true, cell_area)
 
-        return pinn_losses
+        # Calculate additional metrics for evaluation
+        rmse = torch.sqrt(F.mse_loss(y_pred, y_true))
+
+        # Log all losses and metrics
+        for name, value in losses.items():
+            self.log(f"test_{name}", value)
+
+        self.log("test_rmse", rmse)
+
+        return losses["total_loss"]
 
     def configure_optimizers(self):
-        # TODO: Default optimizer for now. There should be a specilise on for PINN?
+        # TODO: Default optimizer for now. There should be a specilised one for PINN?
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.learning_rate,
