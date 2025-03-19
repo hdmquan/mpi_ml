@@ -13,10 +13,10 @@ class PINNModel(pl.LightningModule):
 
     def __init__(
         self,
-        in_channels=7,  # Default: PS, (wind)U, (wind)V, T, Q, TROPLEV, emissions
-        out_channels=6,  # 6 size
-        modes1=12,  # No. Fourier modes in 1st dim
-        modes2=12,  # No. Fourier modes in 2nd dim
+        in_channels=7,  # Order: PS, (wind)U, (wind)V, T, Q, TROPLEV, emissions
+        out_channels=18,  # 6 sizes × 3 (MMR, DryDep, WetDep)
+        modes1=12,
+        modes2=12,
         width=32,
         num_layers=2,
         learning_rate=1e-3,
@@ -24,20 +24,19 @@ class PINNModel(pl.LightningModule):
         physics_weight=0.1,
         boundary_weight=0.1,
         conservation_weight=0.1,
+        deposition_weight=0.1,
         settling_velocities=None,
-        include_coordinates=True,  # Whether to include lat/lon - geography matters
+        include_coordinates=True,
     ):
         """
-        Physics-Informed Neural Network (PINN) for plastic transport modeling.
-
-        This model combines a Fourier Neural Operator with physics constraints to predict
-        plastic concentration evolution while respecting conservation laws.
-
-        Think of it as teaching a neural network about fluid dynamics without the PhD.
+        Extended PINN model to predict MMR, Dry Deposition, and Wet Deposition.
         """
         super(PINNModel, self).__init__()
 
         self.save_hyperparameters()
+
+        # No. size bins
+        self.n_particles = 6
 
         self.fno_model = FNOModel(
             in_channels=in_channels,
@@ -65,42 +64,45 @@ class PINNModel(pl.LightningModule):
 
     def forward(self, x, coords=None):
         """
-        Shapes:
-            x: [batch_size, in_channels, height, width]
-            coords: [batch_size, 2, height, width] (Optional)
+        Forward pass returning MMR and deposition predictions.
 
         Returns:
-            [batch_size, out_channels, height, width]
-
+            tuple: (mmr, dry_dep, wet_dep) each of shape [batch_size, n_particles, height, width]
         """
-        return self.fno_model(x, coords)
+        outputs = self.fno_model(x, coords)
 
-    def compute_physics_loss(self, x, y_pred, y_true, cell_area, dt=1.0):
+        # Split the outputs into MMR and depositions
+        # Each has n_particles channels
+        mmr = outputs[:, : self.n_particles]
+        dry_dep = outputs[:, self.n_particles : 2 * self.n_particles]
+        wet_dep = outputs[:, 2 * self.n_particles :]
+
+        return mmr, dry_dep, wet_dep
+
+    def compute_physics_loss(self, x, predictions, targets, cell_area, dt=1.0):
         """
-        Compute physics-informed losses based on conservation laws and transport equations.
+        Compute physics-informed losses for MMR and deposition predictions.
 
         Args:
             x: Input features [batch_size, in_channels, height, width]
-            y_pred: Predicted mass mixing ratio [batch_size, out_channels, height, width]
-            y_true: Ground truth mass mixing ratio [batch_size, out_channels, height, width]
+            predictions: Tuple of (mmr_pred, dry_dep_pred, wet_dep_pred)
+            targets: Tuple of (mmr_true, dry_dep_true, wet_dep_true)
             cell_area: Area of each grid cell [height, width]
-            dt: Time step between consecutive frames
-
-        Returns:
-            Dictionary of individual physics losses and their weighted sum
+            dt: Time step (right now we don't do time-dependent simulations)
         """
-        batch_size, n_particles, height, width = y_pred.shape
-        device = y_pred.device
+        mmr_pred, dry_dep_pred, wet_dep_pred = predictions
+        mmr_true, dry_dep_true, wet_dep_true = targets
 
-        # Extract relevant input fields (assuming standard order)
-        ps = x[:, 0:1]  # Surface pressure
-        u = x[:, 1:2]  # Eastward wind
-        v = x[:, 2:3]  # Northward wind
-        # w = x[:, 3:4]  # Vertical velocity (if available)
-        emissions = x[:, -1:]  # Assuming emissions is the last channel
+        batch_size, n_particles, height, width = mmr_pred.shape
+        device = mmr_pred.device
 
-        # Reshaping settling velocities for broadcasting
-        # [6] -> [batch, 6, height, width]
+        # Meteorological
+        ps = x[:, 0:1]
+        u = x[:, 1:2]
+        v = x[:, 2:3]
+        emissions = x[:, -1:]
+
+        # Settling velocity
         v_s = (
             self.settling_vel.view(1, -1, 1, 1)
             .expand(batch_size, -1, height, width)
@@ -109,138 +111,115 @@ class PINNModel(pl.LightningModule):
 
         losses = {}
 
-        # 1. Mass Conservation Loss
         # L_mass = (∫∫∫ ρ·MMR dV + ∫∫ (DryDep + WetDep) dA - ∫∫ Emissions dA)²
-        # Simplified: For now, we check if the total mass remains constant minus emissions
-        total_mass_t0 = (y_true[:, :, :, :] * cell_area[None, None, :, :]).sum(
-            dim=(-2, -1)
-        )
-        total_mass_t1 = (y_pred[:, :, :, :] * cell_area[None, None, :, :]).sum(
-            dim=(-2, -1)
-        )
-        total_emissions = (emissions * cell_area[None, None, :, :]).sum(dim=(-2, -1))
 
-        # Simplified mass conservation: change in mass should equal emissions
-        mass_conservation_error = total_mass_t1 - total_mass_t0 - total_emissions
+        mass_true = (mmr_true * cell_area[None, None, :, :]).sum(dim=(-2, -1))
+        mass_pred = (mmr_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
+        dry_dep = (dry_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
+        wet_dep = (wet_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
+        emissions = (emissions * cell_area[None, None, :, :]).sum(dim=(-2, -1))
+
+        mass_conservation_error = mass_pred - mass_true + dry_dep + wet_dep - emissions
         losses["mass_conservation"] = torch.mean(mass_conservation_error**2)
 
-        # 2. Transport Equation Loss
         # L_transport = ∫∫∫ (∂C/∂t + u·∂C/∂x + v·∂C/∂y + w·∂C/∂z - K_h∇²C - K_v∂²C/∂z² - S)² dV dt
+        # NOTE: # Central differences for interior points
 
-        # Compute gradients using finite differences
-        # Note: requires spatial coordinates to be evenly spaced for accurate derivatives
-        # We'll use central differences for interior points
-
-        # Temporal derivative (forward difference)
-        dC_dt = (y_pred - y_true) / dt
+        dC_dt = (mmr_pred - mmr_true) / dt
 
         # Spatial derivatives (central differences)
         # Pad for boundary conditions (periodic assumed for simplicity)
-        y_pad = F.pad(y_pred, (1, 1, 1, 1), mode="circular")
+        mmr_pad = F.pad(mmr_pred, (1, 1, 1, 1), mode="circular")
 
         # Assuming dx and dy are grid spacings (could be passed as parameters)
         # For simplicity, using normalized grid spacing
         dx, dy = 1.0, 1.0
 
-        # Compute x-derivatives using central differences
-        dC_dx = (y_pad[:, :, 1:-1, 2:] - y_pad[:, :, 1:-1, :-2]) / (2 * dx)
+        dC_dx = (mmr_pad[:, :, 1:-1, 2:] - mmr_pad[:, :, 1:-1, :-2]) / (2 * dx)
+        dC_dy = (mmr_pad[:, :, 2:, 1:-1] - mmr_pad[:, :, :-2, 1:-1]) / (2 * dy)
 
-        # Compute y-derivatives using central differences
-        dC_dy = (y_pad[:, :, 2:, 1:-1] - y_pad[:, :, :-2, 1:-1]) / (2 * dy)
+        # TODO: w term and diffusion terms
 
         # Simplified transport residual without diffusion terms
         # (∂C/∂t + u·∂C/∂x + v·∂C/∂y - S)
         transport_residual = dC_dt + u * dC_dx + v * dC_dy - emissions
 
-        # Compute transport loss
+        # Compute transport
         losses["transport"] = torch.mean(transport_residual**2)
 
-        # 3. Settling Velocity Loss
-        # L_settling = ∫∫∫ (∂C/∂t + v_s·∂C/∂z)² dV dt
-        # Note: This is simplified without vertical info, but we can penalize based on settling
-        # Different particle sizes have different settling behaviors
+        # # Questionable. Settling velocity should be correlated with deposition rate.
+        # settling_dep_correlation = v_s * mmr_pred - dry_dep_pred
+        # losses["settling_deposition"] = torch.mean(settling_dep_correlation**2)
 
-        # Simple settling loss (approximation without vertical dimension)
-        # Higher settling velocity should lead to faster deposition
-        settling_effect = v_s * y_pred  # Proxy for settling effect
+        # # Questionable. Physical relationship between MMR and deposition rates
+        # total_dep = dry_dep_pred + wet_dep_pred
+        # dep_balance = torch.mean((total_dep - v_s * mmr_pred) ** 2)
+        # losses["deposition_balance"] = dep_balance
 
-        # The settling loss ensures particles with higher settling velocity have stronger
-        # downward tendency (would need vertical dimension for full implementation)
-        losses["settling"] = torch.mean((dC_dt + settling_effect) ** 2)
+        # # Questionable. All quantities should be non-negative
+        # non_negative_loss = (
+        #     torch.mean(F.relu(-mmr_pred))
+        #     + torch.mean(F.relu(-dry_dep_pred))
+        #     + torch.mean(F.relu(-wet_dep_pred))
+        # )
+        # losses["non_negative"] = non_negative_loss
 
-        # 4. Boundary Layer Interaction Loss
-        # L_boundary = ∫∫ (v_s·C_surface - (DryDep + Emissions))² dA dt
-        # Simplified since we don't have explicit deposition in this prediction
-        boundary_residual = v_s * y_pred - emissions
-        losses["boundary"] = torch.mean(boundary_residual**2)
-
-        # 5. Smoothness Regularization
-        # L_smooth = λ_s ∫∫∫ |∇C|² dV
-        # Gradient magnitude squared
-        gradient_magnitude_squared = dC_dx**2 + dC_dy**2
-        losses["smoothness"] = torch.mean(gradient_magnitude_squared)
-
-        # Combine all physics losses with weights
+        # Combine all physics losses
         total_physics_loss = (
             self.hparams.conservation_weight * losses["mass_conservation"]
-            + self.hparams.physics_weight * losses["transport"]
-            + self.hparams.physics_weight * losses["settling"]
-            + self.hparams.boundary_weight * losses["boundary"]
-            + 0.01 * losses["smoothness"]  # Small weight for smoothness
+            + self.hparams.physics_weight * losses["settling_deposition"]
+            + self.hparams.deposition_weight * losses["deposition_balance"]
+            + 0.1 * losses["non_negative"]  # Small weight for non-negativity
         )
 
         losses["total_physics"] = total_physics_loss
         return losses
 
-    def compute_loss(self, x, y_pred, y_true, cell_area):
+    def compute_loss(self, x, predictions, targets, cell_area):
         """
-        Compute the total loss combining data fidelity (MSE) and physics-informed losses.
-
-        Args:
-            x: Input features [batch_size, in_channels, height, width]
-            y_pred: Predicted mass mixing ratio [batch_size, out_channels, height, width]
-            y_true: Ground truth mass mixing ratio [batch_size, out_channels, height, width]
-            cell_area: Area of each grid cell [height, width]
-
-        Returns:
-            Dictionary of losses including the total loss
+        Compute total loss combining MSE and physics-informed losses.
         """
-        # Data fidelity loss (MSE)
-        mse_loss = F.mse_loss(y_pred, y_true)
+        mmr_pred, dry_dep_pred, wet_dep_pred = predictions
+        mmr_true, dry_dep_true, wet_dep_true = targets
+
+        # Data fidelity losses for each output
+        mse_mmr = F.mse_loss(mmr_pred, mmr_true)
+        mse_dry = F.mse_loss(dry_dep_pred, dry_dep_true)
+        mse_wet = F.mse_loss(wet_dep_pred, wet_dep_true)
+
+        # Combined MSE loss
+        mse_loss = mse_mmr + mse_dry + mse_wet
 
         # Physics-informed losses
-        physics_losses = self.compute_physics_loss(x, y_pred, y_true, cell_area)
+        physics_losses = self.compute_physics_loss(x, predictions, targets, cell_area)
 
         # Combine losses
         total_loss = mse_loss + physics_losses["total_physics"]
 
         # Create loss dictionary
         losses = {
-            "mse": mse_loss,
+            "mse_mmr": mse_mmr,
+            "mse_dry_dep": mse_dry,
+            "mse_wet_dep": mse_wet,
+            "mse_total": mse_loss,
             "total_loss": total_loss,
-            **physics_losses,  # Include all individual physics losses
+            **physics_losses,
         }
 
         return losses
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         """
-        Perform a training step.
-
-        Args:
-            batch: Batch of data containing inputs, targets, and cell areas
-            batch_idx: Index of the batch
-
-        Returns:
-            Total loss for backpropagation
+        Training step handling multiple outputs.
         """
-        x, y_true, cell_area = batch
+        x, targets, cell_area = batch
+        mmr_true, dry_dep_true, wet_dep_true = targets  # Unpack targets
 
         # Forward pass
-        y_pred = self(x)
+        predictions = self(x)  # Returns (mmr_pred, dry_dep_pred, wet_dep_pred)
 
         # Compute losses
-        losses = self.compute_loss(x, y_pred, y_true, cell_area)
+        losses = self.compute_loss(x, predictions, targets, cell_area)
 
         # Log all losses
         for name, value in losses.items():
