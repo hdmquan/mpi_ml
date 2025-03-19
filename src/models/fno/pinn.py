@@ -71,15 +71,13 @@ class PINNModel(pl.LightningModule):
         """
         outputs = self.fno_model(x, coords)
 
-        # Split the outputs into MMR and depositions
-        # Each has n_particles channels
         mmr = outputs[:, : self.n_particles]
         dry_dep = outputs[:, self.n_particles : 2 * self.n_particles]
         wet_dep = outputs[:, 2 * self.n_particles :]
 
         return mmr, dry_dep, wet_dep
 
-    def compute_physics_loss(self, x, predictions, targets, cell_area, dt=1.0):
+    def compute_loss(self, x, predictions, targets, cell_area, dt=1.0):
         """
         Compute physics-informed losses for MMR and deposition predictions.
 
@@ -111,20 +109,28 @@ class PINNModel(pl.LightningModule):
 
         losses = {}
 
-        # L_mass = (∫∫∫ ρ·MMR dV + ∫∫ (DryDep + WetDep) dA - ∫∫ Emissions dA)²
+        # L_mmr = (1/N) Σ (MMR pred - MMR true)^2
+        losses["mmr"] = F.mse_loss(mmr_pred, mmr_true)
 
+        # L_dep = (1/N) Σ (DryDep pred - DryDep true)^2 + (1/N) Σ (WetDep pred - WetDep true)^2
+        losses["deposition"] = F.mse_loss(dry_dep_pred, dry_dep_true) + F.mse_loss(
+            wet_dep_pred, wet_dep_true
+        )
+
+        # L_mass = (∫∫∫ ρ·MMR dV + ∫∫ (DryDep + WetDep) dA - ∫∫ Emissions dA)²
+        # NOTE: Is ρ needed here since this is a loss?
         mass_true = (mmr_true * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         mass_pred = (mmr_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         dry_dep = (dry_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         wet_dep = (wet_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         emissions = (emissions * cell_area[None, None, :, :]).sum(dim=(-2, -1))
 
-        mass_conservation_error = mass_pred - mass_true + dry_dep + wet_dep - emissions
+        mass_conservation_error = (
+            (mass_pred - mass_true) + dry_dep + wet_dep - emissions
+        )
         losses["mass_conservation"] = torch.mean(mass_conservation_error**2)
 
         # L_transport = ∫∫∫ (∂C/∂t + u·∂C/∂x + v·∂C/∂y + w·∂C/∂z - K_h∇²C - K_v∂²C/∂z² - S)² dV dt
-        # NOTE: # Central differences for interior points
-
         dC_dt = (mmr_pred - mmr_true) / dt
 
         # Spatial derivatives (central differences)
@@ -138,143 +144,112 @@ class PINNModel(pl.LightningModule):
         dC_dx = (mmr_pad[:, :, 1:-1, 2:] - mmr_pad[:, :, 1:-1, :-2]) / (2 * dx)
         dC_dy = (mmr_pad[:, :, 2:, 1:-1] - mmr_pad[:, :, :-2, 1:-1]) / (2 * dy)
 
-        # TODO: w term and diffusion terms
+        # Note: w·∂C/∂z and K_v∂²C/∂z² terms are not implemented because
+        # the current model is 2D (no vertical dimension)
+        # For a full 3D implementation, we would need:
+        # dC_dz = (mmr_pad[:, :, 2:, 1:-1, 1:-1] - mmr_pad[:, :, :-2, 1:-1, 1:-1]) / (2 * dz)
+        # We leave these as 0 for now
 
-        # Simplified transport residual without diffusion terms
-        # (∂C/∂t + u·∂C/∂x + v·∂C/∂y - S)
-        transport_residual = dC_dt + u * dC_dx + v * dC_dy - emissions
+        # Horizontal diffusion term (Laplace)
+        d2C_dx2 = (
+            mmr_pad[:, :, 1:-1, 2:] - 2 * mmr_pred + mmr_pad[:, :, 1:-1, :-2]
+        ) / (dx**2)
 
-        # Compute transport
+        d2C_dy2 = (
+            mmr_pad[:, :, 2:, 1:-1] - 2 * mmr_pred + mmr_pad[:, :, :-2, 1:-1]
+        ) / (dy**2)
+
+        laplacian_C = d2C_dx2 + d2C_dy2
+
+        # Assuming Kh = 1.0 for simplicity. Should it be here since this is a loss?
+        Kh = 1.0
+        diffusion_term = Kh * laplacian_C
+
+        transport_residual = dC_dt + u * dC_dx + v * dC_dy - diffusion_term - emissions
         losses["transport"] = torch.mean(transport_residual**2)
 
-        # # Questionable. Settling velocity should be correlated with deposition rate.
-        # settling_dep_correlation = v_s * mmr_pred - dry_dep_pred
-        # losses["settling_deposition"] = torch.mean(settling_dep_correlation**2)
+        # L_settling = (1/V) ∫∫∫ (∂C/∂t + v_s·∂C/∂z)² dV dt
+        # Note: Since we're in 2D, we approximate this with the vertical settling effect
+        # In a full 3D model, we would compute ∂C/∂z correctly
+        # For now, we use a proxy based on the settling velocity and MMR
+        settling_residual = dC_dt + v_s * mmr_pred
+        losses["settling"] = torch.mean(settling_residual**2)
 
-        # # Questionable. Physical relationship between MMR and deposition rates
-        # total_dep = dry_dep_pred + wet_dep_pred
-        # dep_balance = torch.mean((total_dep - v_s * mmr_pred) ** 2)
-        # losses["deposition_balance"] = dep_balance
+        # L_boundary = (1/A) ∫∫ (v_s·C_surface - (DryDep + Emissions))² dA dt
+        # For 2D, we consider the entire domain as the surface
+        boundary_residual = v_s * mmr_pred - (dry_dep_pred + emissions)
+        losses["boundary"] = torch.mean(boundary_residual**2)
 
-        # # Questionable. All quantities should be non-negative
-        # non_negative_loss = (
-        #     torch.mean(F.relu(-mmr_pred))
-        #     + torch.mean(F.relu(-dry_dep_pred))
-        #     + torch.mean(F.relu(-wet_dep_pred))
-        # )
-        # losses["non_negative"] = non_negative_loss
+        # L_smooth = λ_s ∫∫∫ |∇C|² dV
+        # Gradient magnitude squared
+        gradient_mag_sq = dC_dx**2 + dC_dy**2
+        smoothness_param = 0.01  # λ_s
+        losses["smoothness"] = smoothness_param * torch.mean(gradient_mag_sq)
 
-        # Combine all physics losses
+        # Questionable. Settling velocity should be correlated with deposition rate.
+        settling_dep_correlation = v_s * mmr_pred - dry_dep_pred
+        losses["settling_deposition"] = torch.mean(settling_dep_correlation**2)
+
+        # Questionable. Physical relationship between MMR and deposition rates
+        total_dep = dry_dep_pred + wet_dep_pred
+        dep_balance = torch.mean((total_dep - v_s * mmr_pred) ** 2)
+        losses["deposition_balance"] = dep_balance
+
+        # Questionable. All quantities should be non-negative
+        non_negative_loss = (
+            torch.mean(F.relu(-mmr_pred))
+            + torch.mean(F.relu(-dry_dep_pred))
+            + torch.mean(F.relu(-wet_dep_pred))
+        )
+        losses["non_negative"] = non_negative_loss
+
         total_physics_loss = (
             self.hparams.conservation_weight * losses["mass_conservation"]
+            + self.hparams.physics_weight * losses["transport"]
+            + self.hparams.physics_weight * losses["settling"]
+            + self.hparams.boundary_weight * losses["boundary"]
+            + self.hparams.physics_weight * losses["smoothness"]
             + self.hparams.physics_weight * losses["settling_deposition"]
             + self.hparams.deposition_weight * losses["deposition_balance"]
-            + 0.1 * losses["non_negative"]  # Small weight for non-negativity
+            + 0.1 * losses["non_negative"]
         )
 
         losses["total_physics"] = total_physics_loss
         return losses
 
-    def compute_loss(self, x, predictions, targets, cell_area):
-        """
-        Compute total loss combining MSE and physics-informed losses.
-        """
-        mmr_pred, dry_dep_pred, wet_dep_pred = predictions
-        mmr_true, dry_dep_true, wet_dep_true = targets
-
-        # Data fidelity losses for each output
-        mse_mmr = F.mse_loss(mmr_pred, mmr_true)
-        mse_dry = F.mse_loss(dry_dep_pred, dry_dep_true)
-        mse_wet = F.mse_loss(wet_dep_pred, wet_dep_true)
-
-        # Combined MSE loss
-        mse_loss = mse_mmr + mse_dry + mse_wet
-
-        # Physics-informed losses
-        physics_losses = self.compute_physics_loss(x, predictions, targets, cell_area)
-
-        # Combine losses
-        total_loss = mse_loss + physics_losses["total_physics"]
-
-        # Create loss dictionary
-        losses = {
-            "mse_mmr": mse_mmr,
-            "mse_dry_dep": mse_dry,
-            "mse_wet_dep": mse_wet,
-            "mse_total": mse_loss,
-            "total_loss": total_loss,
-            **physics_losses,
-        }
-
-        return losses
-
     def training_step(self, batch, batch_idx) -> torch.Tensor:
-        """
-        Training step handling multiple outputs.
-        """
+
         x, targets, cell_area = batch
-        mmr_true, dry_dep_true, wet_dep_true = targets  # Unpack targets
 
-        # Forward pass
-        predictions = self(x)  # Returns (mmr_pred, dry_dep_pred, wet_dep_pred)
-
-        # Compute losses
+        predictions = self(x)
         losses = self.compute_loss(x, predictions, targets, cell_area)
 
-        # Log all losses
         for name, value in losses.items():
             self.log(f"train_{name}", value, prog_bar=name == "total_loss")
 
         return losses["total_loss"]
 
     def validation_step(self, batch, batch_idx) -> torch.Tensor:
-        """
-        Perform a validation step.
 
-        Args:
-            batch: Batch of data containing inputs, targets, and cell areas
-            batch_idx: Index of the batch
-
-        Returns:
-            Total validation loss
-        """
         x, y_true, cell_area = batch
 
-        # Forward pass
         y_pred = self(x)
-
-        # Compute losses
         losses = self.compute_loss(x, y_pred, y_true, cell_area)
 
-        # Log all losses
         for name, value in losses.items():
             self.log(f"val_{name}", value, prog_bar=name == "total_loss")
 
         return losses["total_loss"]
 
     def test_step(self, batch, batch_idx) -> torch.Tensor:
-        """
-        Perform a test step.
 
-        Args:
-            batch: Batch of data containing inputs, targets, and cell areas
-            batch_idx: Index of the batch
-
-        Returns:
-            Total test loss
-        """
         x, y_true, cell_area = batch
 
-        # Forward pass
         y_pred = self(x)
-
-        # Compute losses
         losses = self.compute_loss(x, y_pred, y_true, cell_area)
 
-        # Calculate additional metrics for evaluation
         rmse = torch.sqrt(F.mse_loss(y_pred, y_true))
 
-        # Log all losses and metrics
         for name, value in losses.items():
             self.log(f"test_{name}", value)
 
@@ -283,7 +258,7 @@ class PINNModel(pl.LightningModule):
         return losses["total_loss"]
 
     def configure_optimizers(self):
-        # TODO: Default optimizer for now. There should be a specilised one for PINN?
+
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.learning_rate,
