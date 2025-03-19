@@ -1,9 +1,10 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from .core import FNOModel
-import numpy as np
+
+from loguru import logger
+
+from src.models.fno.core import FNOModel
 from src.utils import set_seed
 
 set_seed()
@@ -21,10 +22,11 @@ class PINNModel(pl.LightningModule):
         num_layers=2,
         learning_rate=1e-3,
         weight_decay=1e-5,
+        mmr_weight=0.1,
+        deposition_weight=0.1,
+        conservation_weight=0.1,
         physics_weight=0.1,
         boundary_weight=0.1,
-        conservation_weight=0.1,
-        deposition_weight=0.1,
         settling_velocities=None,
         include_coordinates=True,
     ):
@@ -69,6 +71,9 @@ class PINNModel(pl.LightningModule):
         Returns:
             tuple: (mmr, dry_dep, wet_dep) each of shape [batch_size, n_particles, height, width]
         """
+        if coords is None:
+            coords = torch.zeros_like(x[:, :2, :, :])
+
         outputs = self.fno_model(x, coords)
 
         mmr = outputs[:, : self.n_particles]
@@ -94,11 +99,17 @@ class PINNModel(pl.LightningModule):
         batch_size, n_particles, height, width = mmr_pred.shape
         device = mmr_pred.device
 
-        # Meteorological
-        ps = x[:, 0:1]
-        u = x[:, 1:2]
-        v = x[:, 2:3]
-        emissions = x[:, -1:]
+        ps = x[:, [0]]
+        u = x[:, [1]]
+        v = x[:, [2]]
+        emissions = x[:, [-1]]
+
+        logger.info("Initial shapes")
+
+        logger.debug(f"Pressure: {ps.shape}")
+        logger.debug(f"Wind East: {u.shape}")
+        logger.debug(f"Wind North: {v.shape}")
+        logger.debug(f"Emissions: {emissions.shape}")
 
         # Settling velocity
         v_s = (
@@ -106,6 +117,8 @@ class PINNModel(pl.LightningModule):
             .expand(batch_size, -1, height, width)
             .to(device)
         )
+
+        logger.debug(f"Settling velocity: {v_s.shape}")
 
         losses = {}
 
@@ -117,18 +130,31 @@ class PINNModel(pl.LightningModule):
             wet_dep_pred, wet_dep_true
         )
 
+        logger.info("Mass conservation loss")
+
         # L_mass = (∫∫∫ ρ·MMR dV + ∫∫ (DryDep + WetDep) dA - ∫∫ Emissions dA)²
-        # NOTE: Is ρ needed here since this is a loss?
+        # Store the original emissions shape before summation
+        emissions_grid = emissions  # Shape: [12, 1, 500, 400]
+
+        # Calculate mass conservation using summed values
         mass_true = (mmr_true * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         mass_pred = (mmr_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         dry_dep = (dry_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         wet_dep = (wet_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
-        emissions = (emissions * cell_area[None, None, :, :]).sum(dim=(-2, -1))
+        emissions_sum = (emissions * cell_area[None, None, :, :]).sum(dim=(-2, -1))
+
+        logger.debug(f"Mass true: {mass_true.shape}")
+        logger.debug(f"Mass pred: {mass_pred.shape}")
+        logger.debug(f"Dry deposition: {dry_dep.shape}")
+        logger.debug(f"Wet deposition: {wet_dep.shape}")
+        logger.debug(f"Emissions sum: {emissions_sum.shape}")
 
         mass_conservation_error = (
-            (mass_pred - mass_true) + dry_dep + wet_dep - emissions
+            (mass_pred - mass_true) + dry_dep + wet_dep - emissions_sum
         )
         losses["mass_conservation"] = torch.mean(mass_conservation_error**2)
+
+        logger.info("Transport loss")
 
         # L_transport = ∫∫∫ (∂C/∂t + u·∂C/∂x + v·∂C/∂y + w·∂C/∂z - K_h∇²C - K_v∂²C/∂z² - S)² dV dt
         dC_dt = (mmr_pred - mmr_true) / dt
@@ -143,6 +169,11 @@ class PINNModel(pl.LightningModule):
 
         dC_dx = (mmr_pad[:, :, 1:-1, 2:] - mmr_pad[:, :, 1:-1, :-2]) / (2 * dx)
         dC_dy = (mmr_pad[:, :, 2:, 1:-1] - mmr_pad[:, :, :-2, 1:-1]) / (2 * dy)
+
+        logger.debug(f"MMR pad: {mmr_pad.shape}")
+        logger.debug(f"dC_dt: {dC_dt.shape}")
+        logger.debug(f"dC_dx: {dC_dx.shape}")
+        logger.debug(f"dC_dy: {dC_dy.shape}")
 
         # Note: w·∂C/∂z and K_v∂²C/∂z² terms are not implemented because
         # the current model is 2D (no vertical dimension)
@@ -161,11 +192,21 @@ class PINNModel(pl.LightningModule):
 
         laplacian_C = d2C_dx2 + d2C_dy2
 
+        logger.debug(f"Laplacian: {laplacian_C.shape}")
+
         # Assuming Kh = 1.0 for simplicity. Should it be here since this is a loss?
         Kh = 1.0
         diffusion_term = Kh * laplacian_C
 
-        transport_residual = dC_dt + u * dC_dx + v * dC_dy - diffusion_term - emissions
+        logger.debug(f"diffusion_term: {diffusion_term.shape}")
+        logger.debug(f"emissions: {emissions.shape}")
+
+        # Use emissions_grid instead of emissions for transport residual
+        # Expand emissions_grid to match particle dimension
+        emissions_grid = emissions_grid.expand(-1, mmr_pred.size(1), -1, -1)
+        transport_residual = (
+            dC_dt + u * dC_dx + v * dC_dy - diffusion_term - emissions_grid
+        )
         losses["transport"] = torch.mean(transport_residual**2)
 
         # L_settling = (1/V) ∫∫∫ (∂C/∂t + v_s·∂C/∂z)² dV dt
@@ -195,7 +236,7 @@ class PINNModel(pl.LightningModule):
         dep_balance = torch.mean((total_dep - v_s * mmr_pred) ** 2)
         losses["deposition_balance"] = dep_balance
 
-        # Questionable. All quantities should be non-negative
+        # Questionable. Since I deliberately used Softplus?
         non_negative_loss = (
             torch.mean(F.relu(-mmr_pred))
             + torch.mean(F.relu(-dry_dep_pred))
@@ -203,8 +244,10 @@ class PINNModel(pl.LightningModule):
         )
         losses["non_negative"] = non_negative_loss
 
-        total_physics_loss = (
-            self.hparams.conservation_weight * losses["mass_conservation"]
+        total_loss = (
+            self.hparams.mmr_weight * losses["mmr"]
+            + self.hparams.deposition_weight * losses["deposition"]
+            + self.hparams.conservation_weight * losses["mass_conservation"]
             + self.hparams.physics_weight * losses["transport"]
             + self.hparams.physics_weight * losses["settling"]
             + self.hparams.boundary_weight * losses["boundary"]
@@ -214,7 +257,18 @@ class PINNModel(pl.LightningModule):
             + 0.1 * losses["non_negative"]
         )
 
-        losses["total_physics"] = total_physics_loss
+        logger.info("Losses")
+        logger.debug(f"Mass conservation: {losses['mass_conservation']}")
+        logger.debug(f"Transport: {losses['transport']}")
+        logger.debug(f"Settling: {losses['settling']}")
+        logger.debug(f"Boundary: {losses['boundary']}")
+        logger.debug(f"Smoothness: {losses['smoothness']}")
+        logger.debug(f"Settling deposition: {losses['settling_deposition']}")
+        logger.debug(f"Deposition balance: {losses['deposition_balance']}")
+        logger.debug(f"Non-negative: {losses['non_negative']}")
+        logger.debug(f"Total loss: {total_loss}")
+
+        losses["total"] = total_loss
         return losses
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
@@ -277,3 +331,29 @@ class PINNModel(pl.LightningModule):
             "lr_scheduler": scheduler,
             "monitor": "val_total_loss",
         }
+
+
+if __name__ == "__main__":
+    model = PINNModel()
+
+    x = torch.randn(12, 7, 500, 400, requires_grad=True)
+
+    mmr, dry_dep, wet_dep = model(x)
+
+    # Sample loss
+    losses = model.compute_loss(
+        x, (mmr, dry_dep, wet_dep), (mmr, dry_dep, wet_dep), torch.ones_like(mmr)
+    )
+
+    losses["total"].backward()
+
+    for name, param in model.named_parameters():
+        assert param.grad is not None, f"Parameter {name} has no gradient"
+        assert not torch.isnan(
+            param.grad
+        ).any(), f"Parameter {name} has NaN gradient values"
+        assert not torch.isinf(
+            param.grad
+        ).any(), f"Parameter {name} has Inf gradient values"
+
+    logger.success("Gradient check passed successfully!")
