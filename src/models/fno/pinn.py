@@ -152,7 +152,12 @@ class PINNModel(pl.LightningModule):
         mass_conservation_error = (
             (mass_pred - mass_true) + dry_dep + wet_dep - emissions_sum
         )
-        losses["mass_conservation"] = torch.mean(mass_conservation_error**2)
+        total_mass = torch.abs(mass_true).mean() + torch.abs(emissions_sum).mean()
+
+        # Normalize since it's kinda dominate others
+        losses["mass_conservation"] = torch.mean(
+            (mass_conservation_error / (total_mass + 1e-8)) ** 2
+        )
 
         logger.info("Transport loss")
 
