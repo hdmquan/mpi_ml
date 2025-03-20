@@ -6,8 +6,12 @@ from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
 from typing import Optional, Tuple, Dict, List
 from src.utils import PATH, set_seed
+from loguru import logger
 
 set_seed()
+
+# Quantization ◁ △ ▷ ▽ ◁ △ ▷ ▽
+DTYPE = np.float32
 
 
 class MPIDataset(Dataset):
@@ -19,6 +23,7 @@ class MPIDataset(Dataset):
         split: Tuple[float, float, float] = (0.5, 0.25, 0.25),
         normalize: bool = True,
         include_coordinates: bool = True,
+        shuffle: bool = False,
     ):
         """
         Args:
@@ -27,6 +32,7 @@ class MPIDataset(Dataset):
             split: Data split ratios (train, val, test)
             normalize: Whether to normalize the input and output data
             include_coordinates: Whether to include lat/lon coordinates as additional channels
+            shuffle: Whether to shuffle the data indices (default: False)
         """
         super().__init__()
 
@@ -35,6 +41,7 @@ class MPIDataset(Dataset):
         self.split = split
         self.normalize = normalize
         self.include_coordinates = include_coordinates
+        self.shuffle = shuffle
 
         self._prepare_indices()
 
@@ -67,84 +74,84 @@ class MPIDataset(Dataset):
 
     def _prepare_indices(self):
         """
-        In-case of shuffling
+        Prepare indices for data splitting
         """
-
         with h5py.File(self.h5_file, "r") as h5f:
-
             time_dim = h5f["metadata/time"].shape[0]
-
             all_indices = np.arange(time_dim)
-            # np.random.shuffle(all_indices)
+
+            if self.shuffle:
+                shuffled_indices = np.random.permutation(time_dim)
+            else:
+                shuffled_indices = all_indices
 
             train_size = int(time_dim * self.split[0])
             val_size = int(time_dim * self.split[1])
 
             if self.mode == "train":
-                self.indices = all_indices[:train_size]
+                self.indices = np.sort(shuffled_indices[:train_size])
             elif self.mode == "val":
-                self.indices = all_indices[train_size : train_size + val_size]
+                self.indices = np.sort(
+                    shuffled_indices[train_size : train_size + val_size]
+                )
             elif self.mode == "test":
-                self.indices = all_indices[train_size + val_size :]
+                self.indices = np.sort(shuffled_indices[train_size + val_size :])
             else:
                 raise ValueError(f"Invalid mode: {self.mode}")
 
             self.num_samples = len(self.indices)
 
     def _compute_normalization_stats(self, h5f):
-
         # Avoid leakage
         train_indices = self.indices if self.mode == "train" else None
 
         if train_indices is None:
-
             time_dim = h5f["metadata/time"].shape[0]
-            all_indices = np.arange(time_dim)
-
-            np.random.shuffle(all_indices)
+            if self.shuffle:
+                shuffled_indices = np.random.permutation(time_dim)
+            else:
+                shuffled_indices = np.arange(time_dim)
 
             train_size = int(time_dim * self.split[0])
-            train_indices = all_indices[:train_size]
+            train_indices = np.sort(shuffled_indices[:train_size])
 
         self.input_mean = {}
         self.input_std = {}
 
-        for var_name in h5f["inputs"].keys():
+        for var_name in ["PS", "U", "V", "T", "Q", "TROPLEV"]:
             data = h5f[f"inputs/{var_name}"][train_indices]
-
             self.input_mean[var_name] = float(np.mean(data))
             self.input_std[var_name] = float(np.std(data))
-
             if self.input_std[var_name] == 0:
                 self.input_std[var_name] = 1.0
 
         self.output_mean = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
         self.output_std = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
 
-        # TODO: DRY
         for size_idx in range(len(self.settling_velocities)):
-
-            mmr_data = h5f[f"outputs/mass_mixing_ratio/size_{size_idx}"][train_indices]
+            # Update paths to match process.py structure
+            mmr_data = h5f[f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"][
+                train_indices
+            ]
+            dry_dep_data = h5f[
+                f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
+            ][train_indices]
+            wet_dep_data = h5f[
+                f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
+            ][train_indices]
 
             self.output_mean["mmr"][size_idx] = float(np.mean(mmr_data))
             self.output_std["mmr"][size_idx] = float(np.std(mmr_data))
-
             if self.output_std["mmr"][size_idx] == 0:
                 self.output_std["mmr"][size_idx] = 1.0
 
-            dry_dep_data = h5f[f"outputs/deposition/dry_size_{size_idx}"][train_indices]
-
             self.output_mean["dry_dep"][size_idx] = float(np.mean(dry_dep_data))
             self.output_std["dry_dep"][size_idx] = float(np.std(dry_dep_data))
-
             if self.output_std["dry_dep"][size_idx] == 0:
                 self.output_std["dry_dep"][size_idx] = 1.0
 
-            wet_dep_data = h5f[f"outputs/deposition/wet_size_{size_idx}"][train_indices]
-
             self.output_mean["wet_dep"][size_idx] = float(np.mean(wet_dep_data))
             self.output_std["wet_dep"][size_idx] = float(np.std(wet_dep_data))
-
             if self.output_std["wet_dep"][size_idx] == 0:
                 self.output_std["wet_dep"][size_idx] = 1.0
 
@@ -152,100 +159,128 @@ class MPIDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-
         time_idx = self.indices[idx]
 
         with h5py.File(self.h5_file, "r") as h5f:
-            # Order: PS, U, V, T, Q, TROPLEV, emissions
-            ps = h5f["inputs/ps"][time_idx]
-            u = h5f["inputs/u"][time_idx]
-            v = h5f["inputs/v"][time_idx]
-            t = h5f["inputs/t"][time_idx]
-            q = h5f["inputs/q"][time_idx]
-            troplev = h5f["inputs/troplev"][time_idx]
-            emissions = h5f["inputs/emissions"][time_idx]
+            # Get 2D fields - slice directly instead of loading entire arrays
+            ps = h5f["inputs/PS"][time_idx].astype(DTYPE)
+            troplev = h5f["inputs/TROPLEV"][time_idx].astype(DTYPE)
+
+            # Get 3D fields - slice directly and convert to float32
+            u = h5f["inputs/U"][time_idx].astype(DTYPE)
+            v = h5f["inputs/V"][time_idx].astype(DTYPE)
+            t = h5f["inputs/T"][time_idx].astype(DTYPE)
+            q = h5f["inputs/Q"][time_idx].astype(DTYPE)
 
             if self.normalize:
-                ps = (ps - self.input_mean["ps"]) / self.input_std["ps"]
-                u = (u - self.input_mean["u"]) / self.input_std["u"]
-                v = (v - self.input_mean["v"]) / self.input_std["v"]
-                t = (t - self.input_mean["t"]) / self.input_std["t"]
-                q = (q - self.input_mean["q"]) / self.input_std["q"]
-                troplev = (troplev - self.input_mean["troplev"]) / self.input_std[
-                    "troplev"
+                ps = (ps - self.input_mean["PS"]) / self.input_std["PS"]
+                troplev = (troplev - self.input_mean["TROPLEV"]) / self.input_std[
+                    "TROPLEV"
                 ]
-                emissions = (emissions - self.input_mean["emissions"]) / self.input_std[
-                    "emissions"
-                ]
+                u = (u - self.input_mean["U"]) / self.input_std["U"]
+                v = (v - self.input_mean["V"]) / self.input_std["V"]
+                t = (t - self.input_mean["T"]) / self.input_std["T"]
+                q = (q - self.input_mean["Q"]) / self.input_std["Q"]
 
-            inputs = np.stack([ps, u, v, t, q, troplev, emissions], axis=0)
+            # Create sparse coordinates once during initialization instead of for each item
+            if not hasattr(self, "lat_grid_3d") and self.include_coordinates:
+                self._create_coordinate_grids()
+
+            # Use more memory-efficient broadcasting
+            shape = u.shape
+            ps_3d = np.reshape(ps, (1,) + ps.shape).repeat(shape[0], axis=0)
+            troplev_3d = np.reshape(troplev, (1,) + troplev.shape).repeat(
+                shape[0], axis=0
+            )
+
+            # Stack inputs with reduced memory footprint
+            inputs = np.stack([ps_3d, u, v, t, q, troplev_3d], axis=0)
 
             if self.include_coordinates:
-                # [-1, 1]
-                lat_normalized = (
-                    2
-                    * (self.lats - self.lats.min())
-                    / (self.lats.max() - self.lats.min())
-                    - 1
-                )
-
-                lon_normalized = (
-                    2
-                    * (self.lons - self.lons.min())
-                    / (self.lons.max() - self.lons.min())
-                    - 1
-                )
-
-                # Create coordinate meshgrid
-                lat_grid, lon_grid = np.meshgrid(
-                    lat_normalized, lon_normalized, indexing="ij"
-                )
-
-                # Add coordinates as new channels
                 inputs = np.concatenate(
-                    [inputs, lat_grid[np.newaxis], lon_grid[np.newaxis]], axis=0
+                    [inputs, self.lat_grid_3d, self.lon_grid_3d], axis=0
                 )
 
             n_particles = len(self.settling_velocities)
-            mmr = np.zeros((n_particles, len(self.lats), len(self.lons)))
+            n_levels = shape[0]  # Number of vertical levels
 
-            dry_dep = np.zeros_like(mmr)
-            wet_dep = np.zeros_like(mmr)
+            # Initialize with float32 for smaller memory footprint
+            mmr = np.zeros(
+                (n_particles, n_levels, len(self.lats), len(self.lons)),
+                dtype=DTYPE,
+            )
+            dry_dep = np.zeros(
+                (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
+            )
+            wet_dep = np.zeros(
+                (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
+            )
 
             for size_idx in range(n_particles):
-                mmr[size_idx] = h5f[f"outputs/mass_mixing_ratio/size_{size_idx}"][
-                    time_idx
-                ]
-                dry_dep[size_idx] = h5f[f"outputs/deposition/dry_size_{size_idx}"][
-                    time_idx
-                ]
-                wet_dep[size_idx] = h5f[f"outputs/deposition/wet_size_{size_idx}"][
-                    time_idx
-                ]
+                # Load and process one size at a time to reduce memory usage
+                mmr[size_idx] = h5f[
+                    f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"
+                ][time_idx].astype(DTYPE)
+                dry_dep[size_idx] = h5f[
+                    f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
+                ][time_idx].astype(DTYPE)
+                wet_dep[size_idx] = h5f[
+                    f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
+                ][time_idx].astype(DTYPE)
 
                 if self.normalize:
                     mmr[size_idx] = (
                         mmr[size_idx] - self.output_mean["mmr"][size_idx]
                     ) / self.output_std["mmr"][size_idx]
-
                     dry_dep[size_idx] = (
                         dry_dep[size_idx] - self.output_mean["dry_dep"][size_idx]
                     ) / self.output_std["dry_dep"][size_idx]
-
                     wet_dep[size_idx] = (
                         wet_dep[size_idx] - self.output_mean["wet_dep"][size_idx]
                     ) / self.output_std["wet_dep"][size_idx]
 
-        inputs = torch.tensor(inputs, dtype=torch.float32)
+            # Convert to tensors (already float32)
+            inputs = torch.from_numpy(inputs)
+            mmr = torch.from_numpy(mmr)
+            dry_dep = torch.from_numpy(dry_dep)
+            wet_dep = torch.from_numpy(wet_dep)
 
-        mmr = torch.tensor(mmr, dtype=torch.float32)
+            # Use stored cell_area tensor instead of creating new one each time
+            if not hasattr(self, "cell_area_tensor"):
+                self.cell_area_tensor = torch.tensor(
+                    self.cell_area, dtype=torch.float32
+                )
 
-        dry_dep = torch.tensor(dry_dep, dtype=torch.float32)
-        wet_dep = torch.tensor(wet_dep, dtype=torch.float32)
+            return inputs, (mmr, dry_dep, wet_dep), self.cell_area_tensor
 
-        cell_area = torch.tensor(self.cell_area, dtype=torch.float32)
+    def _create_coordinate_grids(self):
+        """Pre-compute coordinate grids once to save memory and computation"""
+        # [-1, 1] normalized coordinates
+        lat_normalized = (
+            2 * (self.lats - self.lats.min()) / (self.lats.max() - self.lats.min()) - 1
+        )
+        lon_normalized = (
+            2 * (self.lons - self.lons.min()) / (self.lons.max() - self.lons.min()) - 1
+        )
 
-        return inputs, (mmr, dry_dep, wet_dep), cell_area
+        # Create coordinate meshgrid
+        lat_grid, lon_grid = np.meshgrid(lat_normalized, lon_normalized, indexing="ij")
+
+        # Create 3D coordinate grids
+        with h5py.File(self.h5_file, "r") as h5f:
+            # Sample one 3D field to get dimensions
+            sample_3d = h5f["inputs/U"][0]
+            n_levels = sample_3d.shape[0]
+
+        # Store as class attributes in the right shape for stacking
+        self.lat_grid_3d = np.broadcast_to(
+            lat_grid[np.newaxis, :, :],
+            (1, n_levels, lat_grid.shape[0], lat_grid.shape[1]),
+        ).astype(DTYPE)
+        self.lon_grid_3d = np.broadcast_to(
+            lon_grid[np.newaxis, :, :],
+            (1, n_levels, lon_grid.shape[0], lon_grid.shape[1]),
+        ).astype(DTYPE)
 
 
 class MPIDataModule(pl.LightningDataModule):
@@ -257,6 +292,7 @@ class MPIDataModule(pl.LightningDataModule):
         split: Tuple[float, float, float] = (0.7, 0.15, 0.15),
         normalize: bool = True,
         include_coordinates: bool = True,
+        **kwargs,
     ):
         super().__init__()
 
@@ -288,6 +324,7 @@ class MPIDataModule(pl.LightningDataModule):
                 split=self.split,
                 normalize=self.normalize,
                 include_coordinates=self.include_coordinates,
+                shuffle=True,
             )
 
             self.val_dataset = MPIDataset(
@@ -296,6 +333,7 @@ class MPIDataModule(pl.LightningDataModule):
                 split=self.split,
                 normalize=self.normalize,
                 include_coordinates=self.include_coordinates,
+                shuffle=True,
             )
 
         if stage == "test" or stage is None:
@@ -305,39 +343,55 @@ class MPIDataModule(pl.LightningDataModule):
                 split=self.split,
                 normalize=self.normalize,
                 include_coordinates=self.include_coordinates,
+                shuffle=True,
             )
 
     def train_dataloader(self):
-
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=True,
+            persistent_workers=True if self.num_workers > 0 else False,
         )
 
     def val_dataloader(self):
-
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
+            persistent_workers=True if self.num_workers > 0 else False,
         )
 
     def test_dataloader(self):
-
         return DataLoader(
             self.test_dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True,
+            persistent_workers=True if self.num_workers > 0 else False,
         )
 
     def get_settling_velocities(self):
 
         with h5py.File(self.h5_file, "r") as h5f:
             return h5f["metadata/settling_velocity"][:]
+
+
+if __name__ == "__main__":
+    datamodule = MPIDataModule()
+    datamodule.setup()
+
+    train_dataloader = datamodule.train_dataloader()
+
+    print(len(train_dataloader))
+
+    for batch in train_dataloader:
+        print(batch[0].shape)
+        print(batch[1][0].shape)
+        print(batch[2].shape)
+        break

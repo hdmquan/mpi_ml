@@ -2,6 +2,7 @@ import os
 import random
 import numpy as np
 import torch
+import lightning as pl
 from pathlib import Path
 
 # packages = [{include = "src", from = "."}]
@@ -30,7 +31,7 @@ def set_seed(seed: int = 37) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-
+    pl.seed_everything(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 

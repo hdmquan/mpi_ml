@@ -104,12 +104,12 @@ class PINNModel(pl.LightningModule):
         v = x[:, [2]]
         emissions = x[:, [-1]]
 
-        logger.info("Initial shapes")
+        # logger.info("Initial shapes")
 
-        logger.debug(f"Pressure: {ps.shape}")
-        logger.debug(f"Wind East: {u.shape}")
-        logger.debug(f"Wind North: {v.shape}")
-        logger.debug(f"Emissions: {emissions.shape}")
+        # logger.debug(f"Pressure: {ps.shape}")
+        # logger.debug(f"Wind East: {u.shape}")
+        # logger.debug(f"Wind North: {v.shape}")
+        # logger.debug(f"Emissions: {emissions.shape}")
 
         # Settling velocity
         v_s = (
@@ -118,7 +118,7 @@ class PINNModel(pl.LightningModule):
             .to(device)
         )
 
-        logger.debug(f"Settling velocity: {v_s.shape}")
+        # logger.debug(f"Settling velocity: {v_s.shape}")
 
         losses = {}
 
@@ -130,7 +130,7 @@ class PINNModel(pl.LightningModule):
             wet_dep_pred, wet_dep_true
         )
 
-        logger.info("Mass conservation loss")
+        # logger.info("Mass conservation loss")
 
         # L_mass = (∫∫∫ ρ·MMR dV + ∫∫ (DryDep + WetDep) dA - ∫∫ Emissions dA)²
         # Store the original emissions shape before summation
@@ -143,11 +143,11 @@ class PINNModel(pl.LightningModule):
         wet_dep = (wet_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         emissions_sum = (emissions * cell_area[None, None, :, :]).sum(dim=(-2, -1))
 
-        logger.debug(f"Mass true: {mass_true.shape}")
-        logger.debug(f"Mass pred: {mass_pred.shape}")
-        logger.debug(f"Dry deposition: {dry_dep.shape}")
-        logger.debug(f"Wet deposition: {wet_dep.shape}")
-        logger.debug(f"Emissions sum: {emissions_sum.shape}")
+        # logger.debug(f"Mass true: {mass_true.shape}")
+        # logger.debug(f"Mass pred: {mass_pred.shape}")
+        # logger.debug(f"Dry deposition: {dry_dep.shape}")
+        # logger.debug(f"Wet deposition: {wet_dep.shape}")
+        # logger.debug(f"Emissions sum: {emissions_sum.shape}")
 
         mass_conservation_error = (
             (mass_pred - mass_true) + dry_dep + wet_dep - emissions_sum
@@ -159,7 +159,7 @@ class PINNModel(pl.LightningModule):
             (mass_conservation_error / (total_mass + 1e-8)) ** 2
         )
 
-        logger.info("Transport loss")
+        # logger.info("Transport loss")
 
         # L_transport = ∫∫∫ (∂C/∂t + u·∂C/∂x + v·∂C/∂y + w·∂C/∂z - K_h∇²C - K_v∂²C/∂z² - S)² dV dt
         dC_dt = (mmr_pred - mmr_true) / dt
@@ -175,10 +175,10 @@ class PINNModel(pl.LightningModule):
         dC_dx = (mmr_pad[:, :, 1:-1, 2:] - mmr_pad[:, :, 1:-1, :-2]) / (2 * dx)
         dC_dy = (mmr_pad[:, :, 2:, 1:-1] - mmr_pad[:, :, :-2, 1:-1]) / (2 * dy)
 
-        logger.debug(f"MMR pad: {mmr_pad.shape}")
-        logger.debug(f"dC_dt: {dC_dt.shape}")
-        logger.debug(f"dC_dx: {dC_dx.shape}")
-        logger.debug(f"dC_dy: {dC_dy.shape}")
+        # logger.debug(f"MMR pad: {mmr_pad.shape}")
+        # logger.debug(f"dC_dt: {dC_dt.shape}")
+        # logger.debug(f"dC_dx: {dC_dx.shape}")
+        # logger.debug(f"dC_dy: {dC_dy.shape}")
 
         # Note: w·∂C/∂z and K_v∂²C/∂z² terms are not implemented because
         # the current model is 2D (no vertical dimension)
@@ -197,14 +197,14 @@ class PINNModel(pl.LightningModule):
 
         laplacian_C = d2C_dx2 + d2C_dy2
 
-        logger.debug(f"Laplacian: {laplacian_C.shape}")
+        # logger.debug(f"Laplacian: {laplacian_C.shape}")
 
         # Assuming Kh = 1.0 for simplicity. Should it be here since this is a loss?
         Kh = 1.0
         diffusion_term = Kh * laplacian_C
 
-        logger.debug(f"diffusion_term: {diffusion_term.shape}")
-        logger.debug(f"emissions: {emissions.shape}")
+        # logger.debug(f"diffusion_term: {diffusion_term.shape}")
+        # logger.debug(f"emissions: {emissions.shape}")
 
         # Use emissions_grid instead of emissions for transport residual
         # Expand emissions_grid to match particle dimension
@@ -262,16 +262,16 @@ class PINNModel(pl.LightningModule):
             + 0.1 * losses["non_negative"]
         )
 
-        logger.info("Losses")
-        logger.debug(f"Mass conservation: {losses['mass_conservation']}")
-        logger.debug(f"Transport: {losses['transport']}")
-        logger.debug(f"Settling: {losses['settling']}")
-        logger.debug(f"Boundary: {losses['boundary']}")
-        logger.debug(f"Smoothness: {losses['smoothness']}")
-        logger.debug(f"Settling deposition: {losses['settling_deposition']}")
-        logger.debug(f"Deposition balance: {losses['deposition_balance']}")
-        logger.debug(f"Non-negative: {losses['non_negative']}")
-        logger.debug(f"Total loss: {total_loss}")
+        # logger.info("Losses")
+        # logger.debug(f"Mass conservation: {losses['mass_conservation']}")
+        # logger.debug(f"Transport: {losses['transport']}")
+        # logger.debug(f"Settling: {losses['settling']}")
+        # logger.debug(f"Boundary: {losses['boundary']}")
+        # logger.debug(f"Smoothness: {losses['smoothness']}")
+        # logger.debug(f"Settling deposition: {losses['settling_deposition']}")
+        # logger.debug(f"Deposition balance: {losses['deposition_balance']}")
+        # logger.debug(f"Non-negative: {losses['non_negative']}")
+        # logger.debug(f"Total loss: {total_loss}")
 
         losses["total"] = total_loss
         return losses
@@ -361,4 +361,4 @@ if __name__ == "__main__":
             param.grad
         ).any(), f"Parameter {name} has Inf gradient values"
 
-    logger.success("Gradient check passed successfully!")
+    # logger.success("Gradient check passed successfully!")

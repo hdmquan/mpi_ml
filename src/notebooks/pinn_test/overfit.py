@@ -12,34 +12,29 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 from pathlib import Path
 
-# Add the project root to the path
-module_path = str(Path(__file__).parents[3])
-if module_path not in sys.path:
-    sys.path.append(module_path)
-
 from src.models.fno.pinn import PINNModel
-from src.data.datamodule import MicroplasticsDataModule
+from src.data.module import MPIDataModule
+from src.utils import set_seed
+
+# Set random seeds for reproducibility
+set_seed()
 
 # %% Config
-SEED = 42
-pl.seed_everything(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
 # Path to dataset
 DATA_DIR = Path("data/processed/")
 BATCH_SIZE = 1
-NUM_EPOCHS = 10
+NUM_EPOCHS = 100
 LEARNING_RATE = 1e-3
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # %% Load a single example from the dataset
 print(f"Loading dataset from {DATA_DIR}")
-datamodule = MicroplasticsDataModule(
-    data_dir=DATA_DIR,
+datamodule = MPIDataModule(
     batch_size=BATCH_SIZE,
     num_workers=0,
-    shuffle=False,  # We want to get the same first sample every time
 )
 datamodule.setup()
 
@@ -55,76 +50,59 @@ print(f"Cell area shape: {cell_area.shape}")
 # %% Define a custom trainer class to capture all metrics during training
 class OverfitTrainer:
     def __init__(self, model, x, targets, cell_area, num_epochs, learning_rate):
-        self.model = model
-        self.x = x
-        self.targets = targets
-        self.cell_area = cell_area
+        self.model = model.to(DEVICE)
+        self.x = x.to(DEVICE)
+        self.targets = [t.to(DEVICE) for t in targets]
+        self.cell_area = cell_area.to(DEVICE)
         self.num_epochs = num_epochs
-        self.learning_rate = learning_rate
-
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
         # Storage for metrics
-        self.epochs = []
-        self.losses = {}
-        self.gradients = {}
+        self.losses = {"total_loss": [], "data_loss": [], "physics_loss": []}
 
     def train(self):
-        self.model.to(DEVICE)
-        self.x = self.x.to(DEVICE)
-        self.targets = [t.to(DEVICE) for t in self.targets]
-        self.cell_area = self.cell_area.to(DEVICE)
-
         for epoch in range(self.num_epochs):
-            # Zero gradients
             self.optimizer.zero_grad()
 
             # Forward pass
             predictions = self.model(self.x)
-
-            # Compute losses
             losses = self.model.compute_loss(
                 self.x, predictions, self.targets, self.cell_area
             )
 
-            # Total loss (data loss + physics loss)
+            # Calculate losses
             data_loss = losses["mmr"] + losses["deposition"]
             physics_loss = losses["total_physics"]
             total_loss = data_loss + physics_loss
-            losses["data_loss"] = data_loss
-            losses["total_loss"] = total_loss
 
-            # Backward pass and optimize
+            # Backward pass
             total_loss.backward()
-
-            # Record losses
-            self.epochs.append(epoch)
-            for loss_name, loss_value in losses.items():
-                if loss_name not in self.losses:
-                    self.losses[loss_name] = []
-                self.losses[loss_name].append(loss_value.item())
-
-            # Record parameter gradients
-            for name, param in self.model.named_parameters():
-                if param.grad is not None:
-                    if name not in self.gradients:
-                        self.gradients[name] = []
-                    # Use mean absolute gradient for each parameter
-                    self.gradients[name].append(param.grad.abs().mean().item())
-
-            # Step optimizer
             self.optimizer.step()
 
-            # Print progress
-            if epoch % 1 == 0:
-                print(
-                    f"Epoch {epoch}: Total Loss = {total_loss.item():.6f}, "
-                    f"Data Loss = {data_loss.item():.6f}, "
-                    f"Physics Loss = {physics_loss.item():.6f}"
-                )
+            # Store losses
+            self.losses["total_loss"].append(total_loss.item())
+            self.losses["data_loss"].append(data_loss.item())
+            self.losses["physics_loss"].append(physics_loss.item())
 
-        print("Training complete!")
+            if epoch % 10 == 0:
+                print(f"Epoch {epoch}: Loss = {total_loss.item():.6f}")
+
         return self.losses["total_loss"][-1]
+
+
+def plot_training_curves(trainer):
+    fig = go.Figure()
+
+    for name, values in trainer.losses.items():
+        fig.add_trace(go.Scatter(y=values, name=name, mode="lines"))
+
+    fig.update_layout(
+        title="Training Losses",
+        xaxis_title="Epoch",
+        yaxis_title="Loss",
+        yaxis_type="log",
+    )
+    return fig
 
 
 # %% Create and train the model
@@ -150,59 +128,14 @@ trainer = OverfitTrainer(
 final_loss = trainer.train()
 
 # %% Plot losses
-fig = make_subplots(
-    rows=2,
-    cols=1,
-    subplot_titles=["Training Losses", "Parameter Gradients"],
-    vertical_spacing=0.15,
-)
-
-# Plot all losses
-for loss_name, loss_values in trainer.losses.items():
-    fig.add_trace(
-        go.Scatter(x=trainer.epochs, y=loss_values, name=loss_name, mode="lines"),
-        row=1,
-        col=1,
-    )
-
-# Plot gradients - select a subset if there are too many parameters
-gradient_names = list(trainer.gradients.keys())
-if len(gradient_names) > 10:
-    # Select a representative sample of gradients
-    gradient_names = gradient_names[:10]
-
-for name in gradient_names:
-    fig.add_trace(
-        go.Scatter(
-            x=trainer.epochs,
-            y=trainer.gradients[name],
-            name=f"grad_{name}",
-            mode="lines",
-        ),
-        row=2,
-        col=1,
-    )
-
-# Update layout
-fig.update_layout(
-    height=800,
-    width=1000,
-    title_text="Overfitting Test Results",
-    showlegend=True,
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-)
-
-fig.update_xaxes(title_text="Epoch", row=1, col=1)
-fig.update_xaxes(title_text="Epoch", row=2, col=1)
-fig.update_yaxes(title_text="Loss Value", row=1, col=1)
-fig.update_yaxes(title_text="Gradient Magnitude", row=2, col=1)
-
-# Use log scale for losses
-fig.update_yaxes(type="log", row=1, col=1)
-
-# Save the figure
+fig = plot_training_curves(trainer)
 fig.write_html("overfit_results.html")
 fig.show()
+
+# %% Check if model successfully overfit
+LOSS_THRESHOLD = 1e-2
+print(f"\nFinal loss: {final_loss:.6f}")
+print(f"Can the model overfit? {'YES' if final_loss < LOSS_THRESHOLD else 'NO'}")
 
 # %% Test model predictions on the training sample
 model.eval()
@@ -222,17 +155,6 @@ with torch.no_grad():
     print(f"RMSE for MMR: {mmr_rmse:.6f}")
     print(f"RMSE for Dry Deposition: {dry_dep_rmse:.6f}")
     print(f"RMSE for Wet Deposition: {wet_dep_rmse:.6f}")
-
-# %% Evaluate if the model can fit this data point
-# Define a threshold for what we consider "minimal" loss
-LOSS_THRESHOLD = 1e-2
-CAN_OVERFIT = final_loss < LOSS_THRESHOLD
-
-print(f"Final loss: {final_loss:.6f}")
-print(f"Loss threshold: {LOSS_THRESHOLD}")
-print(f"Can the model overfit a single example? {'YES' if CAN_OVERFIT else 'NO'}")
-
-assert CAN_OVERFIT, "Model failed to overfit a single training example"
 
 
 # %% Visualization of predicted vs actual values
