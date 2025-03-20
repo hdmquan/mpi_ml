@@ -245,6 +245,11 @@ class MPIDataset(Dataset):
             dry_dep = torch.from_numpy(dry_dep)
             wet_dep = torch.from_numpy(wet_dep)
 
+            logger.debug(f"Inputs shape: {inputs.shape}")
+            logger.debug(f"MMR shape: {mmr.shape}")
+            logger.debug(f"Dry dep shape: {dry_dep.shape}")
+            logger.debug(f"Wet dep shape: {wet_dep.shape}")
+
             # Use stored cell_area tensor instead of creating new one each time
             if not hasattr(self, "cell_area_tensor"):
                 self.cell_area_tensor = torch.tensor(
@@ -287,9 +292,9 @@ class MPIDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        batch_size: int = 32,
+        batch_size: int = 1,
         num_workers: int = 4,
-        split: Tuple[float, float, float] = (0.7, 0.15, 0.15),
+        split: Tuple[float, float, float] = (0.5, 0.25, 0.25),
         normalize: bool = True,
         include_coordinates: bool = True,
         **kwargs,
