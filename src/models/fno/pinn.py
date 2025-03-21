@@ -345,9 +345,16 @@ if __name__ == "__main__":
 
     mmr, dry_dep, wet_dep = model(x)
 
+    sample_mmr = torch.randn(12, 6, 48, 500, 400)
+    sample_dry_dep = torch.randn(12, 6, 500, 400)
+    sample_wet_dep = torch.randn(12, 6, 500, 400)
+
     # Sample loss
     losses = model.compute_loss(
-        x, (mmr, dry_dep, wet_dep), (mmr, dry_dep, wet_dep), torch.ones_like(mmr)
+        x,
+        (sample_mmr, sample_dry_dep, sample_wet_dep),
+        (mmr, dry_dep, wet_dep),
+        torch.ones_like(mmr),
     )
 
     losses["total"].backward()
@@ -361,4 +368,4 @@ if __name__ == "__main__":
             param.grad
         ).any(), f"Parameter {name} has Inf gradient values"
 
-    # logger.success("Gradient check passed successfully!")
+    logger.success("Gradient check passed successfully!")
