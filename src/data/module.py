@@ -245,10 +245,10 @@ class MPIDataset(Dataset):
             dry_dep = torch.from_numpy(dry_dep)
             wet_dep = torch.from_numpy(wet_dep)
 
-            logger.debug(f"Inputs shape: {inputs.shape}")
-            logger.debug(f"MMR shape: {mmr.shape}")
-            logger.debug(f"Dry dep shape: {dry_dep.shape}")
-            logger.debug(f"Wet dep shape: {wet_dep.shape}")
+            # logger.debug(f"Inputs shape: {inputs.shape}")
+            # logger.debug(f"MMR shape: {mmr.shape}")
+            # logger.debug(f"Dry dep shape: {dry_dep.shape}")
+            # logger.debug(f"Wet dep shape: {wet_dep.shape}")
 
             # Use stored cell_area tensor instead of creating new one each time
             if not hasattr(self, "cell_area_tensor"):
@@ -396,7 +396,9 @@ if __name__ == "__main__":
     print(len(train_dataloader))
 
     for batch in train_dataloader:
-        print(batch[0].shape)
-        print(batch[1][0].shape)
-        print(batch[2].shape)
+        print(batch[0].shape)  # [1, 8, 48, 384, 576]
+        print(batch[1][0].shape)  # [1, 6, 48, 384, 576]
+        print(batch[1][1].shape)  # [1, 6, 384, 576]
+        print(batch[1][2].shape)  # [1, 6, 384, 576]
+        print(batch[2].shape)  # [1, 384, 576]
         break
