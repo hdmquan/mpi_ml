@@ -7,30 +7,27 @@ from loguru import logger
 
 from src.data.module import MPIDataModule
 
-datamodule = MPIDataModule()
+datamodule = MPIDataModule(batch_size=1, shuffle=True)
 datamodule.setup()
 
 train_loader = datamodule.train_dataloader()
 val_loader = datamodule.val_dataloader()
 test_loader = datamodule.test_dataloader()
 
-# Initialize scaler for feature standardization
 scaler = StandardScaler()
 
-# Initialize SGDRegressor with good default settings
 base_sgd = SGDRegressor(
-    loss="huber",  # Huber loss is robust to outliers
-    learning_rate="adaptive",  # Automatically decreases learning rate
-    eta0=0.01,  # Initial learning rate
-    penalty="l2",  # L2 regularization to prevent overfitting
-    alpha=0.0001,  # Regularization strength
+    loss="huber",
+    learning_rate="adaptive",
+    eta0=0.01,
+    penalty="l2",
+    alpha=0.0001,
     max_iter=1000,
     tol=1e-3,
-    warm_start=True,  # Enable warm start for partial_fit
+    warm_start=True,  # On for partial_fit
     random_state=37,
 )
 
-# Create separate models for each output
 models = [SGDRegressor(**base_sgd.get_params()) for _ in range(6)]
 
 
@@ -51,22 +48,18 @@ def extract_features_labels(batch):
     return inputs, mmr
 
 
-# First batch used to initialize the scaler
 first_batch = next(iter(train_loader))
 X_init, _ = extract_features_labels(first_batch)
 scaler.fit(X_init)
 
-# Training loop
-for epoch in range(5):  # Multiple epochs over the data
+for epoch in range(5):
     for batch in train_loader:
         X_train, y_train = extract_features_labels(batch)
 
-        # Standardize features
         X_train = scaler.transform(X_train)
 
         logger.debug(f"X: {X_train.shape} | y: {y_train.shape}")
 
-        # Partial fit each model
         for i, model in enumerate(models):
             model.partial_fit(X_train, y_train[:, i])
 
@@ -77,7 +70,6 @@ def evaluate(loader, name):
         X, y = extract_features_labels(batch)
         X = scaler.transform(X)  # Standardize features
 
-        # Predict using all models
         batch_preds = np.column_stack([model.predict(X) for model in models])
         y_true.append(y)
         y_pred.append(batch_preds)
