@@ -162,12 +162,27 @@ y_true = y_true.reshape(48, 384, 576, 6)
 y_pred = y_pred.reshape(48, 384, 576, 6)
 
 # %%
-subplots = make_subplots(rows=6, cols=2)
+subplots = make_subplots(rows=6, cols=2, subplot_titles=[f"Output {i}" for i in range(6)] * 2)
 
 for i in range(6):
-    # Plot images
-    subplots.add_trace(go.Image(z=y_true[0, :, :, i]), row=i + 1, col=1)
-    subplots.add_trace(go.Image(z=y_pred[0, :, :, i]), row=i + 1, col=2)
+    # True values heatmap
+    subplots.add_trace(
+        go.Heatmap(z=y_true[0, :, :, i], colorscale="Viridis", colorbar=dict(title="True")),
+        row=i + 1, col=1
+    )
+    
+    # Predicted values heatmap
+    subplots.add_trace(
+        go.Heatmap(z=y_pred[0, :, :, i], colorscale="Viridis", colorbar=dict(title="Predicted")),
+        row=i + 1, col=2
+    )
+
+subplots.update_layout(
+    title="True vs. Predicted Values",
+    height=1500,  # Adjust height for better spacing
+    width=1000,
+    showlegend=False,
+)
 
 subplots.show()
 
