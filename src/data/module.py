@@ -74,17 +74,16 @@ class MPIDataset(Dataset):
 
     def _prepare_indices(self):
         """
-        Prepare indices for data splitting
+        For data splitting
         """
         with h5py.File(self.h5_file, "r") as h5f:
             time_dim = h5f["metadata/time"].shape[0]
             all_indices = np.arange(time_dim)
 
-            # Use the already seeded random state
             if self.shuffle:
                 rng = (
                     np.random.default_rng()
-                )  # Uses the global seed that was already set
+                )
                 shuffled_indices = rng.permutation(all_indices)
             else:
                 shuffled_indices = all_indices

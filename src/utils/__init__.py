@@ -27,6 +27,9 @@ class PATH:
 
 
 def set_seed(seed: int = 37) -> None:
+    """
+    Set seed globally for all used library.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

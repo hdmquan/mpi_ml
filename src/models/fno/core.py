@@ -17,7 +17,8 @@ class SpectralConv2d(nn.Module):
 
         self.scale = 1 / (in_channels * out_channels)
 
-        # Random init with complex weights
+        # Random init with complex (cfloat) weights
+        # Note to future self: FFT is "3D"
         self.weights1 = nn.Parameter(
             self.scale
             * torch.randn(

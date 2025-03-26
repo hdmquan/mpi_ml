@@ -10,23 +10,30 @@ from src.utils import set_seed
 set_seed()
 
 
+
+
 class PINNModel(pl.LightningModule):
 
     def __init__(
         self,
-        in_channels=7,  # Order: PS, (wind)U, (wind)V, T, Q, TROPLEV, emissions
+        # Order: PS, (wind)U, (wind)V, T, Q, TROPLEV, emissions
+        # Translate: Pressure, Wind East, Wind North, Temperature, Humidity, Troposphere, Source term
+        in_channels=7,  
         out_channels=18,  # 6 sizes × 3 (MMR, DryDep, WetDep)
+        # FNO settings
         modes1=12,
         modes2=12,
         width=32,
         num_layers=2,
         learning_rate=1e-3,
         weight_decay=1e-5,
+        # Downplay PINN lossed for now
         mmr_weight=0.1,
         deposition_weight=0.1,
         conservation_weight=0.1,
         physics_weight=0.1,
         boundary_weight=0.1,
+        # 
         settling_velocities=None,
         include_coordinates=True,
     ):
@@ -134,13 +141,16 @@ class PINNModel(pl.LightningModule):
 
         # L_mass = (∫∫∫ ρ·MMR dV + ∫∫ (DryDep + WetDep) dA - ∫∫ Emissions dA)²
         # Store the original emissions shape before summation
+        # ρ is ignore since this is a loss
         emissions_grid = emissions  # Shape: [12, 1, 500, 400]
 
         # Calculate mass conservation using summed values
         mass_true = (mmr_true * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         mass_pred = (mmr_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
+
         dry_dep = (dry_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
         wet_dep = (wet_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
+
         emissions_sum = (emissions * cell_area[None, None, :, :]).sum(dim=(-2, -1))
 
         # logger.debug(f"Mass true: {mass_true.shape}")

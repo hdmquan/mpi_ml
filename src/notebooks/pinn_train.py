@@ -65,10 +65,12 @@ class MetricsCallback(pl.Callback):
     def on_train_epoch_end(self, trainer, pl_module):
         # Record losses
         train_losses.append(trainer.callback_metrics.get("train_total_loss", 0).item())
+
         physics_losses.append(
             trainer.callback_metrics.get("train_conservation_loss", 0).item()
         )
         data_losses.append(trainer.callback_metrics.get("train_data_loss", 0).item())
+        
         epochs.append(trainer.current_epoch)
 
         # Save gradients for key parameters
