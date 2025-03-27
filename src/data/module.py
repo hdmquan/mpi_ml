@@ -24,6 +24,7 @@ class MPIDataset(Dataset):
         normalize: bool = True,
         include_coordinates: bool = True,
         shuffle: bool = False,
+        reverse_lev: bool = True,
     ):
         """
         Args:
@@ -33,6 +34,7 @@ class MPIDataset(Dataset):
             normalize: Whether to normalize the input and output data
             include_coordinates: Whether to include lat/lon coordinates as additional channels
             shuffle: Whether to shuffle the data indices (default: False)
+            reverse_lev: Latitude originally descending (default: True)
         """
         super().__init__()
 
@@ -42,6 +44,7 @@ class MPIDataset(Dataset):
         self.normalize = normalize
         self.include_coordinates = include_coordinates
         self.shuffle = shuffle
+        self.reverse_lev = reverse_lev
 
         self._prepare_indices()
 
@@ -81,9 +84,7 @@ class MPIDataset(Dataset):
             all_indices = np.arange(time_dim)
 
             if self.shuffle:
-                rng = (
-                    np.random.default_rng()
-                )
+                rng = np.random.default_rng()
                 shuffled_indices = rng.permutation(all_indices)
             else:
                 shuffled_indices = all_indices
@@ -189,7 +190,7 @@ class MPIDataset(Dataset):
             if not hasattr(self, "lat_grid_3d") and self.include_coordinates:
                 self._create_coordinate_grids()
 
-            # Use more memory-efficient broadcasting
+            # Repeat the 2D fields to match the 3D field shape
             shape = u.shape
             ps_3d = np.reshape(ps, (1,) + ps.shape).repeat(shape[0], axis=0)
             troplev_3d = np.reshape(troplev, (1,) + troplev.shape).repeat(
@@ -248,16 +249,20 @@ class MPIDataset(Dataset):
             dry_dep = torch.from_numpy(dry_dep)
             wet_dep = torch.from_numpy(wet_dep)
 
-            # logger.debug(f"Inputs shape: {inputs.shape}")
-            # logger.debug(f"MMR shape: {mmr.shape}")
-            # logger.debug(f"Dry dep shape: {dry_dep.shape}")
-            # logger.debug(f"Wet dep shape: {wet_dep.shape}")
+            logger.debug(f"Inputs shape: {inputs.shape}")
+            logger.debug(f"MMR shape: {mmr.shape}")
+            logger.debug(f"Dry dep shape: {dry_dep.shape}")
+            logger.debug(f"Wet dep shape: {wet_dep.shape}")
 
             # Use stored cell_area tensor instead of creating new one each time
             if not hasattr(self, "cell_area_tensor"):
                 self.cell_area_tensor = torch.tensor(
                     self.cell_area, dtype=torch.float32
                 )
+
+            if self.reverse_lev:
+                inputs = torch.flip(inputs, dims=(1,))
+                mmr = torch.flip(mmr, dims=(1,))
 
             return inputs, (mmr, dry_dep, wet_dep), self.cell_area_tensor
 

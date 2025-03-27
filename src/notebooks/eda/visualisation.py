@@ -30,8 +30,8 @@ def plot_layer(x, lev, num_channels=6, titles=None):
                 z=x[0, i, lev, :, :],
                 colorscale="RdBu",
                 reversescale=True,
-                zmin=-1,
-                zmax=1,
+                # zmin=-1,
+                # zmax=1,
             ),
             row=row,
             col=col,
@@ -61,8 +61,8 @@ def plot_long_cut(x, long, num_channels=6, titles=None):
                 z=x[0, i, :, :, long],
                 colorscale="RdBu",
                 reversescale=True,
-                zmin=-1,
-                zmax=1,
+                # zmin=-1,
+                # zmax=1,
             ),
             row=row,
             col=col,
@@ -92,10 +92,6 @@ print(X.shape)
 # [1, 6, 48, 384, 576]
 b, c, l, x, y = Y.shape
 
-# %%
-# Level is reversed
-Y = torch.flip(Y, dims=(2,))
-
 # %% Level-by-level inspection
 lev = 1
 
@@ -113,8 +109,10 @@ titles = [
     "Humidity",
     "Tropospheric pressure",
 ]
-lev = 48
+lev = 1
 plot_layer(X, lev - 1, titles=titles)
 
 # %%
-plot_long_cut(X, x // 2)
+plot_long_cut(X, x // 2, titles=titles)
+
+# %%
