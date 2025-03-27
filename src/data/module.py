@@ -26,6 +26,7 @@ class MPIDataset(Dataset):
         shuffle: bool = False,
         reverse_lev: bool = True,
         include_troplev: bool = False,
+        only_mmr: bool = True,
     ):
         """
         Args:
@@ -47,7 +48,7 @@ class MPIDataset(Dataset):
         self.shuffle = shuffle
         self.reverse_lev = reverse_lev
         self.include_troplev = include_troplev
-
+        self.only_mmr = only_mmr
         self._prepare_indices()
 
         # Metadata
@@ -144,27 +145,29 @@ class MPIDataset(Dataset):
             mmr_data = h5f[f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"][
                 train_indices
             ]
-            dry_dep_data = h5f[
-                f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
-            ][train_indices]
-            wet_dep_data = h5f[
-                f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
-            ][train_indices]
 
             self.output_mean["mmr"][size_idx] = float(np.mean(mmr_data))
             self.output_std["mmr"][size_idx] = float(np.std(mmr_data))
             if self.output_std["mmr"][size_idx] == 0:
                 self.output_std["mmr"][size_idx] = 1.0
 
-            self.output_mean["dry_dep"][size_idx] = float(np.mean(dry_dep_data))
-            self.output_std["dry_dep"][size_idx] = float(np.std(dry_dep_data))
-            if self.output_std["dry_dep"][size_idx] == 0:
-                self.output_std["dry_dep"][size_idx] = 1.0
+            if self.only_mmr:
+                dry_dep_data = h5f[
+                    f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
+                ][train_indices]
+                wet_dep_data = h5f[
+                    f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
+                ][train_indices]
 
-            self.output_mean["wet_dep"][size_idx] = float(np.mean(wet_dep_data))
-            self.output_std["wet_dep"][size_idx] = float(np.std(wet_dep_data))
-            if self.output_std["wet_dep"][size_idx] == 0:
-                self.output_std["wet_dep"][size_idx] = 1.0
+                self.output_mean["dry_dep"][size_idx] = float(np.mean(dry_dep_data))
+                self.output_std["dry_dep"][size_idx] = float(np.std(dry_dep_data))
+                if self.output_std["dry_dep"][size_idx] == 0:
+                    self.output_std["dry_dep"][size_idx] = 1.0
+
+                self.output_mean["wet_dep"][size_idx] = float(np.mean(wet_dep_data))
+                self.output_std["wet_dep"][size_idx] = float(np.std(wet_dep_data))
+                if self.output_std["wet_dep"][size_idx] == 0:
+                    self.output_std["wet_dep"][size_idx] = 1.0
 
     def __len__(self):
         return self.num_samples
@@ -225,41 +228,49 @@ class MPIDataset(Dataset):
                 (n_particles, n_levels, len(self.lats), len(self.lons)),
                 dtype=DTYPE,
             )
-            dry_dep = np.zeros(
-                (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
-            )
-            wet_dep = np.zeros(
-                (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
-            )
+
+            if self.only_mmr:
+                dry_dep = np.zeros(
+                    (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
+                )
+                wet_dep = np.zeros(
+                    (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
+                )
 
             for size_idx in range(n_particles):
                 # Load and process one size at a time to reduce memory usage
                 mmr[size_idx] = h5f[
                     f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"
                 ][time_idx].astype(DTYPE)
-                dry_dep[size_idx] = h5f[
-                    f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
-                ][time_idx].astype(DTYPE)
-                wet_dep[size_idx] = h5f[
-                    f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
-                ][time_idx].astype(DTYPE)
+
+                if self.only_mmr:
+                    dry_dep[size_idx] = h5f[
+                        f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
+                    ][time_idx].astype(DTYPE)
+                    wet_dep[size_idx] = h5f[
+                        f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
+                    ][time_idx].astype(DTYPE)
 
                 if self.normalize:
                     mmr[size_idx] = (
                         mmr[size_idx] - self.output_mean["mmr"][size_idx]
                     ) / self.output_std["mmr"][size_idx]
-                    dry_dep[size_idx] = (
-                        dry_dep[size_idx] - self.output_mean["dry_dep"][size_idx]
-                    ) / self.output_std["dry_dep"][size_idx]
-                    wet_dep[size_idx] = (
-                        wet_dep[size_idx] - self.output_mean["wet_dep"][size_idx]
-                    ) / self.output_std["wet_dep"][size_idx]
+
+                    if self.only_mmr:
+                        dry_dep[size_idx] = (
+                            dry_dep[size_idx] - self.output_mean["dry_dep"][size_idx]
+                        ) / self.output_std["dry_dep"][size_idx]
+                        wet_dep[size_idx] = (
+                            wet_dep[size_idx] - self.output_mean["wet_dep"][size_idx]
+                        ) / self.output_std["wet_dep"][size_idx]
 
             # Convert to tensors (already float32)
             inputs = torch.from_numpy(inputs)
             mmr = torch.from_numpy(mmr)
-            dry_dep = torch.from_numpy(dry_dep)
-            wet_dep = torch.from_numpy(wet_dep)
+
+            if self.only_mmr:
+                dry_dep = torch.from_numpy(dry_dep)
+                wet_dep = torch.from_numpy(wet_dep)
 
             # logger.debug(f"Inputs shape: {inputs.shape}")
             # logger.debug(f"MMR shape: {mmr.shape}")
@@ -276,7 +287,10 @@ class MPIDataset(Dataset):
                 inputs = torch.flip(inputs, dims=(1,))
                 mmr = torch.flip(mmr, dims=(1,))
 
-            return inputs, (mmr, dry_dep, wet_dep), self.cell_area_tensor
+            if self.only_mmr:
+                return inputs, (mmr, dry_dep, wet_dep), self.cell_area_tensor
+            else:
+                return inputs, mmr, self.cell_area_tensor
 
     def _create_coordinate_grids(self):
         """Pre-compute coordinate grids once to save memory and computation"""

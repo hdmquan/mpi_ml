@@ -1,4 +1,6 @@
 logs/
+lightning_logs/
+.lightning_studio/
 results/
 /checkpoints/
 
