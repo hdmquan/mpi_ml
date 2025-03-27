@@ -10,15 +10,14 @@ from src.utils import set_seed
 set_seed()
 
 
-
-
 class PINNModel(pl.LightningModule):
 
     def __init__(
         self,
-        # Order: PS, (wind)U, (wind)V, T, Q, TROPLEV, emissions
-        # Translate: Pressure, Wind East, Wind North, Temperature, Humidity, Troposphere, Source term
-        in_channels=7,  
+        # NOTE: Troposphere is not used since it's zeros
+        # Order: PS, (wind)U, (wind)V, T, Q, emissions
+        # Translate: Pressure, Wind East, Wind North, Temperature, Humidity, Source term
+        in_channels=7,
         out_channels=18,  # 6 sizes × 3 (MMR, DryDep, WetDep)
         # FNO settings
         modes1=12,
@@ -33,7 +32,7 @@ class PINNModel(pl.LightningModule):
         conservation_weight=0.1,
         physics_weight=0.1,
         boundary_weight=0.1,
-        # 
+        #
         settling_velocities=None,
         include_coordinates=True,
     ):
@@ -351,9 +350,13 @@ class PINNModel(pl.LightningModule):
 if __name__ == "__main__":
     model = PINNModel()
 
-    x = torch.randn(12, 7, 500, 400, requires_grad=True)
+    x = torch.randn(12, 7, 48, 500, 400, requires_grad=True)
 
     mmr, dry_dep, wet_dep = model(x)
+
+    print(f"mmr: {mmr.shape}")
+    print(f"dry_dep: {dry_dep.shape}")
+    print(f"wet_dep: {wet_dep.shape}")
 
     sample_mmr = torch.randn(12, 6, 48, 500, 400)
     sample_dry_dep = torch.randn(12, 6, 500, 400)

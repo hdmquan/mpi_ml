@@ -25,6 +25,7 @@ class MPIDataset(Dataset):
         include_coordinates: bool = True,
         shuffle: bool = False,
         reverse_lev: bool = True,
+        include_troplev: bool = False,
     ):
         """
         Args:
@@ -122,7 +123,12 @@ class MPIDataset(Dataset):
         self.input_mean = {}
         self.input_std = {}
 
-        for var_name in ["PS", "U", "V", "T", "Q", "TROPLEV"]:
+        met_vars = ["PS", "U", "V", "T", "Q"]
+
+        if self.include_troplev:
+            met_vars.append("TROPLEV")
+
+        for var_name in met_vars:
             data = h5f[f"inputs/{var_name}"][train_indices]
             self.input_mean[var_name] = float(np.mean(data))
             self.input_std[var_name] = float(np.std(data))
@@ -178,9 +184,10 @@ class MPIDataset(Dataset):
 
             if self.normalize:
                 ps = (ps - self.input_mean["PS"]) / self.input_std["PS"]
-                troplev = (troplev - self.input_mean["TROPLEV"]) / self.input_std[
-                    "TROPLEV"
-                ]
+                if self.include_troplev:
+                    troplev = (troplev - self.input_mean["TROPLEV"]) / self.input_std[
+                        "TROPLEV"
+                    ]
                 u = (u - self.input_mean["U"]) / self.input_std["U"]
                 v = (v - self.input_mean["V"]) / self.input_std["V"]
                 t = (t - self.input_mean["T"]) / self.input_std["T"]
