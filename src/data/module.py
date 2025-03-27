@@ -288,9 +288,9 @@ class MPIDataset(Dataset):
                 mmr = torch.flip(mmr, dims=(1,))
 
             if self.only_mmr:
-                return inputs, (mmr, dry_dep, wet_dep), self.cell_area_tensor
-            else:
                 return inputs, mmr, self.cell_area_tensor
+            else:
+                return inputs, (mmr, dry_dep, wet_dep), self.cell_area_tensor
 
     def _create_coordinate_grids(self):
         """Pre-compute coordinate grids once to save memory and computation"""
