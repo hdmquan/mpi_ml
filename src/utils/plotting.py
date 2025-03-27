@@ -1,8 +1,9 @@
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from src.utils import PATH
 
 
-def plot_layer(x, lev, num_channels=6, titles=None):
+def plot_layer(x, lev, num_channels=6, titles=None, save=False):
     """
     Shape: [batch_size, channels, altitude, latitude, longitude]
     """
@@ -37,10 +38,13 @@ def plot_layer(x, lev, num_channels=6, titles=None):
         height=800,
     )
 
+    if save:
+        fig.write_html(PATH / f"layer_{lev}.html")
+    # else:
     fig.show()
 
 
-def plot_long_cut(x, long, num_channels=6, titles=None):
+def plot_long_cut(x, long, num_channels=6, titles=None, save=False):
     """
     Shape: [batch_size, channels, altitude, latitude, longitude]
     """
@@ -71,4 +75,7 @@ def plot_long_cut(x, long, num_channels=6, titles=None):
         height=800,
     )
 
+    if save:
+        fig.write_html(PATH / f"long_cut_{long}.html")
+    # else:
     fig.show()

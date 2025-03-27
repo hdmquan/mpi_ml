@@ -13,9 +13,9 @@ model = PINNModel()
 
 # %% Training
 trainer = pl.Trainer(
-    max_epochs=5,
+    max_epochs=1,
     devices=1,
-    precision=16,
+    precision="bf16-mixed",
     enable_checkpointing=True,
     enable_progress_bar=True,
     enable_model_summary=True,
@@ -29,21 +29,23 @@ print(f"Test Results: {test_results}")
 
 # %% Get sample batch and predict
 batch = next(iter(datamodule.test_dataloader()))
-x, (mmr, _, _), cell_area = batch  # Unpack the targets tuple correctly
+x, y, cell_area = batch  # Unpack the targets tuple correctly
 y_pred = model(x)
 
 # %% Visualize level 1
 lev = 1
 
 # Ground truth
-plot_layer(mmr, lev - 1)
+plot_layer(y, lev - 1, save=True)
 
 # Predictions
-plot_layer(y_pred, lev - 1)
+plot_layer(y_pred, lev - 1, save=True)
 
 # %% Visualize longitude cuts
 # Ground truth
-plot_long_cut(mmr, mmr.shape[-1] // 2)
+plot_long_cut(y, y.shape[-1] // 2, save=True)
 
 # Predictions
-plot_long_cut(y_pred, y_pred.shape[-1] // 2)
+plot_long_cut(y_pred, y_pred.shape[-1] // 2, save=True)
+
+# %%

@@ -209,13 +209,17 @@ class PINNModel(pl.LightningModule):
 
         x, targets, cell_area = batch
 
+        logger.debug(f"X: {x.shape}")
+        logger.debug(f"Targets: {targets.shape}")
+        logger.debug(f"Cell area: {cell_area.shape}")
+
         predictions = self(x)
         losses = self.compute_loss(x, predictions, targets, cell_area)
 
         for name, value in losses.items():
-            self.log(f"train_{name}", value, prog_bar=name == "total_loss")
+            self.log(f"train_{name}", value, prog_bar=name == "total")
 
-        return losses["total_loss"]
+        return losses["total"]
 
     def validation_step(self, batch, batch_idx) -> torch.Tensor:
 
@@ -225,9 +229,9 @@ class PINNModel(pl.LightningModule):
         losses = self.compute_loss(x, y_pred, y_true, cell_area)
 
         for name, value in losses.items():
-            self.log(f"val_{name}", value, prog_bar=name == "total_loss")
+            self.log(f"val_{name}", value, prog_bar=name == "total")
 
-        return losses["total_loss"]
+        return losses["total"]
 
     def test_step(self, batch, batch_idx) -> torch.Tensor:
 
@@ -243,7 +247,7 @@ class PINNModel(pl.LightningModule):
 
         self.log("test_rmse", rmse)
 
-        return losses["total_loss"]
+        return losses["total"]
 
     def configure_optimizers(self):
 
