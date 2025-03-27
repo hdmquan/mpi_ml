@@ -175,7 +175,8 @@ class MPIDataset(Dataset):
         with h5py.File(self.h5_file, "r") as h5f:
             # Get 2D fields - slice directly instead of loading entire arrays
             ps = h5f["inputs/PS"][time_idx].astype(DTYPE)
-            troplev = h5f["inputs/TROPLEV"][time_idx].astype(DTYPE)
+            if self.include_troplev:
+                troplev = h5f["inputs/TROPLEV"][time_idx].astype(DTYPE)
 
             # Get 3D fields - slice directly and convert to float32
             u = h5f["inputs/U"][time_idx].astype(DTYPE)
@@ -201,12 +202,15 @@ class MPIDataset(Dataset):
             # Repeat the 2D fields to match the 3D field shape
             shape = u.shape
             ps_3d = np.reshape(ps, (1,) + ps.shape).repeat(shape[0], axis=0)
-            troplev_3d = np.reshape(troplev, (1,) + troplev.shape).repeat(
-                shape[0], axis=0
-            )
+            if self.include_troplev:
+                troplev_3d = np.reshape(troplev, (1,) + troplev.shape).repeat(
+                    shape[0], axis=0
+                )
 
             # Stack inputs with reduced memory footprint
-            inputs = np.stack([ps_3d, u, v, t, q, troplev_3d], axis=0)
+            inputs = np.stack([ps_3d, u, v, t, q], axis=0)
+            if self.include_troplev:
+                inputs = np.concatenate([inputs, troplev_3d], axis=0)
 
             if self.include_coordinates:
                 inputs = np.concatenate(
@@ -257,10 +261,10 @@ class MPIDataset(Dataset):
             dry_dep = torch.from_numpy(dry_dep)
             wet_dep = torch.from_numpy(wet_dep)
 
-            logger.debug(f"Inputs shape: {inputs.shape}")
-            logger.debug(f"MMR shape: {mmr.shape}")
-            logger.debug(f"Dry dep shape: {dry_dep.shape}")
-            logger.debug(f"Wet dep shape: {wet_dep.shape}")
+            # logger.debug(f"Inputs shape: {inputs.shape}")
+            # logger.debug(f"MMR shape: {mmr.shape}")
+            # logger.debug(f"Dry dep shape: {dry_dep.shape}")
+            # logger.debug(f"Wet dep shape: {wet_dep.shape}")
 
             # Use stored cell_area tensor instead of creating new one each time
             if not hasattr(self, "cell_area_tensor"):
