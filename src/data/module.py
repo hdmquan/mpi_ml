@@ -46,6 +46,7 @@ class MPIDataset(Dataset):
         self.include_coordinates = include_coordinates
         self.shuffle = shuffle
         self.reverse_lev = reverse_lev
+        self.include_troplev = include_troplev
 
         self._prepare_indices()
 
