@@ -4,7 +4,7 @@ import pytorch_lightning as pl
 
 from loguru import logger
 
-from src.models.fno.core import FNOModel
+from src.models.fno.core import FNOModel3D
 from src.utils import set_seed
 
 set_seed()
@@ -18,39 +18,38 @@ class PINNModel(pl.LightningModule):
         # Order: PS, (wind)U, (wind)V, T, Q, emissions
         # Translate: Pressure, Wind East, Wind North, Temperature, Humidity, Source term
         in_channels=7,
-        out_channels=18,  # 6 sizes × 3 (MMR, DryDep, WetDep)
+        out_channels=6,  # 6 sizes
         # FNO settings
-        modes1=12,
-        modes2=12,
+        modes1=8,  # altitude modes
+        modes2=12,  # latitude modes
+        modes3=12,  # longitude modes
         width=32,
         num_layers=2,
         learning_rate=1e-3,
         weight_decay=1e-5,
-        # Downplay PINN lossed for now
-        mmr_weight=0.1,
-        deposition_weight=0.1,
+        # PINN loss weights
+        mmr_weight=1.0,
         conservation_weight=0.1,
         physics_weight=0.1,
-        boundary_weight=0.1,
         #
         settling_velocities=None,
         include_coordinates=True,
     ):
         """
-        Extended PINN model to predict MMR, Dry Deposition, and Wet Deposition.
+        PINN model to predict MMR (Mass Mixing Ratio) with altitude.
         """
         super(PINNModel, self).__init__()
 
         self.save_hyperparameters()
 
-        # No. size bins
         self.n_particles = 6
 
-        self.fno_model = FNOModel(
+        self.fno_model = FNOModel3D(
             in_channels=in_channels,
             out_channels=out_channels,
             modes1=modes1,
             modes2=modes2,
+            modes3=modes3,
             width=width,
             num_layers=num_layers,
             include_coordinates=include_coordinates,
@@ -72,42 +71,39 @@ class PINNModel(pl.LightningModule):
 
     def forward(self, x, coords=None):
         """
-        Forward pass returning MMR and deposition predictions.
-
-        Returns:
-            tuple: (mmr, dry_dep, wet_dep) each of shape [batch_size, n_particles, height, width]
-        """
-        if coords is None:
-            coords = torch.zeros_like(x[:, :2, :, :])
-
-        outputs = self.fno_model(x, coords)
-
-        mmr = outputs[:, : self.n_particles]
-        dry_dep = outputs[:, self.n_particles : 2 * self.n_particles]
-        wet_dep = outputs[:, 2 * self.n_particles :]
-
-        return mmr, dry_dep, wet_dep
-
-    def compute_loss(self, x, predictions, targets, cell_area, dt=1.0):
-        """
-        Compute physics-informed losses for MMR and deposition predictions.
+        Forward pass returning MMR predictions.
 
         Args:
-            x: Input features [batch_size, in_channels, height, width]
-            predictions: Tuple of (mmr_pred, dry_dep_pred, wet_dep_pred)
-            targets: Tuple of (mmr_true, dry_dep_true, wet_dep_true)
+            x: Input tensor [batch_size, channels, altitude, latitude, longitude]
+            coords: Optional coordinate grid
+
+        Returns:
+            tensor: MMR predictions [batch_size, n_particles, altitude, latitude, longitude]
+        """
+        if coords is None:
+            coords = self.fno_model.get_grid(
+                (x.size(-3), x.size(-2), x.size(-1)), device=x.device
+            ).expand(x.size(0), -1, -1, -1, -1)
+
+        return self.fno_model(x, coords)
+
+    def compute_loss(self, x, mmr_pred, mmr_true, cell_area, dt=1.0):
+        """
+        Compute physics-informed losses for MMR predictions.
+
+        Args:
+            x: Input features [batch_size, in_channels, altitude, latitude, longitude]
+            mmr_pred: MMR predictions [batch_size, n_particles, altitude, latitude, longitude]
+            mmr_true: MMR true values [batch_size, n_particles, altitude, latitude, longitude]
             cell_area: Area of each grid cell [height, width]
             dt: Time step (right now we don't do time-dependent simulations)
         """
-        mmr_pred, dry_dep_pred, wet_dep_pred = predictions
-        mmr_true, dry_dep_true, wet_dep_true = targets
-
-        batch_size, n_particles, height, width = mmr_pred.shape
+        batch_size, n_particles, altitude, latitude, longitude = mmr_pred.shape
         device = mmr_pred.device
 
-        ps = x[:, [0]]
-        u = x[:, [1]]
-        v = x[:, [2]]
+        ps = x[:, [0]]  # Pressure
+        u = x[:, [1]]  # Wind East
+        v = x[:, [2]]  # Wind North
         emissions = x[:, [-1]]
 
         # logger.info("Initial shapes")
@@ -119,8 +115,8 @@ class PINNModel(pl.LightningModule):
 
         # Settling velocity
         v_s = (
-            self.settling_vel.view(1, -1, 1, 1)
-            .expand(batch_size, -1, height, width)
+            self.settling_vel.view(1, -1, 1, 1, 1)
+            .expand(batch_size, -1, altitude, latitude, longitude)
             .to(device)
         )
 
@@ -131,39 +127,17 @@ class PINNModel(pl.LightningModule):
         # L_mmr = (1/N) Σ (MMR pred - MMR true)^2
         losses["mmr"] = F.mse_loss(mmr_pred, mmr_true)
 
-        # L_dep = (1/N) Σ (DryDep pred - DryDep true)^2 + (1/N) Σ (WetDep pred - WetDep true)^2
-        losses["deposition"] = F.mse_loss(dry_dep_pred, dry_dep_true) + F.mse_loss(
-            wet_dep_pred, wet_dep_true
-        )
-
-        # logger.info("Mass conservation loss")
-
-        # L_mass = (∫∫∫ ρ·MMR dV + ∫∫ (DryDep + WetDep) dA - ∫∫ Emissions dA)²
+        # L_mass = (∫∫∫ ρ·MMR dV - ∫∫ Emissions dA)²
         # Store the original emissions shape before summation
         # ρ is ignore since this is a loss
-        emissions_grid = emissions  # Shape: [12, 1, 500, 400]
-
-        # Calculate mass conservation using summed values
-        mass_true = (mmr_true * cell_area[None, None, :, :]).sum(dim=(-2, -1))
-        mass_pred = (mmr_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
-
-        dry_dep = (dry_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
-        wet_dep = (wet_dep_pred * cell_area[None, None, :, :]).sum(dim=(-2, -1))
-
-        emissions_sum = (emissions * cell_area[None, None, :, :]).sum(dim=(-2, -1))
-
-        # logger.debug(f"Mass true: {mass_true.shape}")
-        # logger.debug(f"Mass pred: {mass_pred.shape}")
-        # logger.debug(f"Dry deposition: {dry_dep.shape}")
-        # logger.debug(f"Wet deposition: {wet_dep.shape}")
-        # logger.debug(f"Emissions sum: {emissions_sum.shape}")
-
-        mass_conservation_error = (
-            (mass_pred - mass_true) + dry_dep + wet_dep - emissions_sum
+        mass_true = (mmr_true * cell_area[None, None, None, :, :]).sum(dim=(-2, -1))
+        mass_pred = (mmr_pred * cell_area[None, None, None, :, :]).sum(dim=(-2, -1))
+        emissions_sum = (emissions * cell_area[None, None, None, :, :]).sum(
+            dim=(-2, -1)
         )
-        total_mass = torch.abs(mass_true).mean() + torch.abs(emissions_sum).mean()
 
-        # Normalize since it's kinda dominate others
+        mass_conservation_error = (mass_pred - mass_true) - emissions_sum
+        total_mass = torch.abs(mass_true).mean() + torch.abs(emissions_sum).mean()
         losses["mass_conservation"] = torch.mean(
             (mass_conservation_error / (total_mass + 1e-8)) ** 2
         )
@@ -173,114 +147,60 @@ class PINNModel(pl.LightningModule):
         # L_transport = ∫∫∫ (∂C/∂t + u·∂C/∂x + v·∂C/∂y + w·∂C/∂z - K_h∇²C - K_v∂²C/∂z² - S)² dV dt
         dC_dt = (mmr_pred - mmr_true) / dt
 
-        # Spatial derivatives (central differences)
-        # Pad for boundary conditions (periodic assumed for simplicity)
-        mmr_pad = F.pad(mmr_pred, (1, 1, 1, 1), mode="circular")
+        # Spatial derivatives (central differences with periodic padding)
+        mmr_pad = F.pad(mmr_pred, (1, 1, 1, 1, 0, 0), mode="circular")
+        dx, dy, dz = 1.0, 1.0, 1.0
 
-        # Assuming dx and dy are grid spacings (could be passed as parameters)
-        # For simplicity, using normalized grid spacing
-        dx, dy = 1.0, 1.0
+        dC_dx = (mmr_pad[:, :, :, 1:-1, 2:] - mmr_pad[:, :, :, 1:-1, :-2]) / (2 * dx)
+        dC_dy = (mmr_pad[:, :, :, 2:, 1:-1] - mmr_pad[:, :, :, :-2, 1:-1]) / (2 * dy)
 
-        dC_dx = (mmr_pad[:, :, 1:-1, 2:] - mmr_pad[:, :, 1:-1, :-2]) / (2 * dx)
-        dC_dy = (mmr_pad[:, :, 2:, 1:-1] - mmr_pad[:, :, :-2, 1:-1]) / (2 * dy)
+        # Vertical derivatives (zero-padding for top/bottom boundaries)
+        mmr_pad_z = F.pad(mmr_pred, (0, 0, 0, 0, 1, 1), mode="replicate")
+        dC_dz = (mmr_pad_z[:, :, 2:, :, :] - mmr_pad_z[:, :, :-2, :, :]) / (2 * dz)
 
         # logger.debug(f"MMR pad: {mmr_pad.shape}")
         # logger.debug(f"dC_dt: {dC_dt.shape}")
         # logger.debug(f"dC_dx: {dC_dx.shape}")
         # logger.debug(f"dC_dy: {dC_dy.shape}")
 
-        # Note: w·∂C/∂z and K_v∂²C/∂z² terms are not implemented because
-        # the current model is 2D (no vertical dimension)
-        # For a full 3D implementation, we would need:
-        # dC_dz = (mmr_pad[:, :, 2:, 1:-1, 1:-1] - mmr_pad[:, :, :-2, 1:-1, 1:-1]) / (2 * dz)
-        # We leave these as 0 for now
-
         # Horizontal diffusion term (Laplace)
         d2C_dx2 = (
-            mmr_pad[:, :, 1:-1, 2:] - 2 * mmr_pred + mmr_pad[:, :, 1:-1, :-2]
+            mmr_pad[:, :, :, 1:-1, 2:] - 2 * mmr_pred + mmr_pad[:, :, :, 1:-1, :-2]
         ) / (dx**2)
-
         d2C_dy2 = (
-            mmr_pad[:, :, 2:, 1:-1] - 2 * mmr_pred + mmr_pad[:, :, :-2, 1:-1]
+            mmr_pad[:, :, :, 2:, 1:-1] - 2 * mmr_pred + mmr_pad[:, :, :, :-2, 1:-1]
         ) / (dy**2)
+        d2C_dz2 = (
+            mmr_pad_z[:, :, 2:, :, :] - 2 * mmr_pred + mmr_pad_z[:, :, :-2, :, :]
+        ) / (dz**2)
 
-        laplacian_C = d2C_dx2 + d2C_dy2
+        laplacian_C = d2C_dx2 + d2C_dy2 + d2C_dz2
 
-        # logger.debug(f"Laplacian: {laplacian_C.shape}")
+        logger.debug(f"Laplacian: {laplacian_C.shape}")
 
-        # Assuming Kh = 1.0 for simplicity. Should it be here since this is a loss?
-        Kh = 1.0
-        diffusion_term = Kh * laplacian_C
+        Kh = 1.0  # Horizontal diffusion coefficient
+        Kv = 0.1  # Vertical diffusion coefficient
+        diffusion_term = Kh * (d2C_dx2 + d2C_dy2) + Kv * d2C_dz2
 
-        # logger.debug(f"diffusion_term: {diffusion_term.shape}")
-        # logger.debug(f"emissions: {emissions.shape}")
+        # Expand emissions to match particle and altitude dimensions
+        emissions_grid = emissions.expand(-1, mmr_pred.size(1), altitude, -1, -1)
 
-        # Use emissions_grid instead of emissions for transport residual
-        # Expand emissions_grid to match particle dimension
-        emissions_grid = emissions_grid.expand(-1, mmr_pred.size(1), -1, -1)
         transport_residual = (
-            dC_dt + u * dC_dx + v * dC_dy - diffusion_term - emissions_grid
+            dC_dt
+            + u * dC_dx
+            + v * dC_dy
+            + v_s * dC_dz
+            - diffusion_term
+            - emissions_grid
         )
         losses["transport"] = torch.mean(transport_residual**2)
 
-        # L_settling = (1/V) ∫∫∫ (∂C/∂t + v_s·∂C/∂z)² dV dt
-        # Note: Since we're in 2D, we approximate this with the vertical settling effect
-        # In a full 3D model, we would compute ∂C/∂z correctly
-        # For now, we use a proxy based on the settling velocity and MMR
-        settling_residual = dC_dt + v_s * mmr_pred
-        losses["settling"] = torch.mean(settling_residual**2)
-
-        # L_boundary = (1/A) ∫∫ (v_s·C_surface - (DryDep + Emissions))² dA dt
-        # For 2D, we consider the entire domain as the surface
-        boundary_residual = v_s * mmr_pred - (dry_dep_pred + emissions)
-        losses["boundary"] = torch.mean(boundary_residual**2)
-
-        # L_smooth = λ_s ∫∫∫ |∇C|² dV
-        # Gradient magnitude squared
-        gradient_mag_sq = dC_dx**2 + dC_dy**2
-        smoothness_param = 0.01  # λ_s
-        losses["smoothness"] = smoothness_param * torch.mean(gradient_mag_sq)
-
-        # Questionable. Settling velocity should be correlated with deposition rate.
-        settling_dep_correlation = v_s * mmr_pred - dry_dep_pred
-        losses["settling_deposition"] = torch.mean(settling_dep_correlation**2)
-
-        # Questionable. Physical relationship between MMR and deposition rates
-        total_dep = dry_dep_pred + wet_dep_pred
-        dep_balance = torch.mean((total_dep - v_s * mmr_pred) ** 2)
-        losses["deposition_balance"] = dep_balance
-
-        # Questionable. Since I deliberately used Softplus?
-        non_negative_loss = (
-            torch.mean(F.relu(-mmr_pred))
-            + torch.mean(F.relu(-dry_dep_pred))
-            + torch.mean(F.relu(-wet_dep_pred))
-        )
-        losses["non_negative"] = non_negative_loss
-
+        # Total loss
         total_loss = (
             self.hparams.mmr_weight * losses["mmr"]
-            + self.hparams.deposition_weight * losses["deposition"]
             + self.hparams.conservation_weight * losses["mass_conservation"]
             + self.hparams.physics_weight * losses["transport"]
-            + self.hparams.physics_weight * losses["settling"]
-            + self.hparams.boundary_weight * losses["boundary"]
-            + self.hparams.physics_weight * losses["smoothness"]
-            + self.hparams.physics_weight * losses["settling_deposition"]
-            + self.hparams.deposition_weight * losses["deposition_balance"]
-            + 0.1 * losses["non_negative"]
         )
-
-        # logger.info("Losses")
-        # logger.debug(f"Mass conservation: {losses['mass_conservation']}")
-        # logger.debug(f"Transport: {losses['transport']}")
-        # logger.debug(f"Settling: {losses['settling']}")
-        # logger.debug(f"Boundary: {losses['boundary']}")
-        # logger.debug(f"Smoothness: {losses['smoothness']}")
-        # logger.debug(f"Settling deposition: {losses['settling_deposition']}")
-        # logger.debug(f"Deposition balance: {losses['deposition_balance']}")
-        # logger.debug(f"Non-negative: {losses['non_negative']}")
-        # logger.debug(f"Total loss: {total_loss}")
 
         losses["total"] = total_loss
         return losses
@@ -350,24 +270,22 @@ class PINNModel(pl.LightningModule):
 if __name__ == "__main__":
     model = PINNModel()
 
-    x = torch.randn(12, 7, 48, 500, 400, requires_grad=True)
+    # batch_size, features, altitude, latitude, longitude
+    x = torch.randn(1, 7, 48, 500, 400, requires_grad=True)
 
-    mmr, dry_dep, wet_dep = model(x)
+    predictions = model(x)
 
-    print(f"mmr: {mmr.shape}")
-    print(f"dry_dep: {dry_dep.shape}")
-    print(f"wet_dep: {wet_dep.shape}")
+    print(f"Predictions: {predictions.shape}")
 
-    sample_mmr = torch.randn(12, 6, 48, 500, 400)
-    sample_dry_dep = torch.randn(12, 6, 500, 400)
-    sample_wet_dep = torch.randn(12, 6, 500, 400)
+    # batch_size, features, altitude, latitude, longitude
+    sample_y = torch.randn(1, 6, 48, 500, 400)
 
     # Sample loss
     losses = model.compute_loss(
         x,
-        (sample_mmr, sample_dry_dep, sample_wet_dep),
-        (mmr, dry_dep, wet_dep),
-        torch.ones_like(mmr),
+        predictions,
+        sample_y,
+        torch.randn(500, 400),
     )
 
     losses["total"].backward()
