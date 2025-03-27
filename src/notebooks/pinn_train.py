@@ -19,6 +19,7 @@ trainer = pl.Trainer(
     enable_checkpointing=True,
     enable_progress_bar=True,
     enable_model_summary=True,
+    num_sanity_val_steps=0,
 )
 
 trainer.fit(model, datamodule)
