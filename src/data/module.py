@@ -422,8 +422,14 @@ class MPIDataModule(pl.LightningDataModule):
 
 
 if __name__ == "__main__":
+    from src.utils.memory import print_memory_usage, print_tensor_memory
+
+    print_memory_usage()
+
     datamodule = MPIDataModule()
     datamodule.setup()
+
+    print_memory_usage()
 
     train_dataloader = datamodule.train_dataloader()
 
@@ -431,8 +437,14 @@ if __name__ == "__main__":
 
     for batch in train_dataloader:
         print(batch[0].shape)  # [1, 8, 48, 384, 576]
-        print(batch[1][0].shape)  # [1, 6, 48, 384, 576]
-        print(batch[1][1].shape)  # [1, 6, 384, 576]
-        print(batch[1][2].shape)  # [1, 6, 384, 576]
+        print_tensor_memory(batch[0])
+        print(batch[1].shape)  # [1, 6, 48, 384, 576]
+        print_tensor_memory(batch[1])
+        # print(batch[1][0].shape)  # [1, 6, 48, 384, 576]
+        # print(batch[1][1].shape)  # [1, 6, 384, 576]
+        # print(batch[1][2].shape)  # [1, 6, 384, 576]
         print(batch[2].shape)  # [1, 384, 576]
+        print_tensor_memory(batch[2])
+        print_memory_usage()
+
         break
