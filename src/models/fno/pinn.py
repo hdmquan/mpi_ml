@@ -272,27 +272,38 @@ class PINNModel(pl.LightningModule):
 
 
 if __name__ == "__main__":
+    import time
+
     model = PINNModel()
 
     # batch_size, features, altitude, latitude, longitude
-    x = torch.randn(1, 7, 48, 500, 400, requires_grad=True)
+    x = torch.randn(1, 7, 48, 600, 400, requires_grad=True)
 
+    start_time = time.time()
     predictions = model(x)
+    end_time = time.time()
+    print(f"Time taken for forward pass: {end_time - start_time} seconds")
 
     print(f"Predictions: {predictions.shape}")
 
     # batch_size, features, altitude, latitude, longitude
-    sample_y = torch.randn(1, 6, 48, 500, 400)
+    sample_y = torch.randn(1, 6, 48, 600, 400)
 
+    start_time = time.time()
     # Sample loss
     losses = model.compute_loss(
         x,
         predictions,
         sample_y,
-        torch.randn(500, 400),
+        torch.randn(600, 400),
     )
+    end_time = time.time()
+    print(f"Time taken for loss computation: {end_time - start_time} seconds")
 
+    start_time = time.time()
     losses["total"].backward()
+    end_time = time.time()
+    print(f"Time taken for backward pass: {end_time - start_time} seconds")
 
     for name, param in model.named_parameters():
         assert param.grad is not None, f"Parameter {name} has no gradient"
