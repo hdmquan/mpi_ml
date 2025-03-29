@@ -39,7 +39,7 @@ def plot_layer(x, lev, num_channels=6, titles=None, save=False):
     )
 
     if save:
-        fig.write_html(PATH / f"layer_{lev}.html")
+        fig.write_html(PATH.SRC / f"layer_{lev}.html")
     # else:
     fig.show()
 
@@ -76,6 +76,6 @@ def plot_long_cut(x, long, num_channels=6, titles=None, save=False):
     )
 
     if save:
-        fig.write_html(PATH / f"long_cut_{long}.html")
+        fig.write_html(PATH.SRC / f"long_cut_{long}.html")
     # else:
     fig.show()
