@@ -40,15 +40,15 @@ x, y, cell_area = [b.to(model.device) for b in batch]
 y_pred = model(x)
 
 # Ground truth
-plot_layer(y.cpu(), 0, save=True)  # Level 1
+plot_layer(y.cpu().detach(), 0, save=True)  # Level 1
 
 # Predictions
-plot_layer(y_pred.cpu(), 0, save=True)  # Level 1
+plot_layer(y_pred.cpu().detach(), 0, save=True)  # Level 1
 
 # Ground truth longitude cuts
-plot_long_cut(y.cpu(), y.shape[-1] // 2, save=True)
+plot_long_cut(y.cpu().detach(), y.shape[-1] // 2, save=True)
 
 # Predictions longitude cuts
-plot_long_cut(y_pred.cpu(), y_pred.shape[-1] // 2, save=True)
+plot_long_cut(y_pred.cpu().detach(), y_pred.shape[-1] // 2, save=True)
 
 # %%
