@@ -151,7 +151,7 @@ class BasePINN(pl.LightningModule, ABC):
 
         laplacian_C = d2C_dx2 + d2C_dy2 + d2C_dz2
 
-        logger.debug(f"Laplacian: {laplacian_C.shape}")
+        # logger.debug(f"Laplacian: {laplacian_C.shape}")
 
         Kh = 1.0  # Horizontal diffusion coefficient
         Kv = 0.1  # Vertical diffusion coefficient
@@ -184,9 +184,9 @@ class BasePINN(pl.LightningModule, ABC):
 
         x, targets, cell_area = batch
 
-        logger.debug(f"X: {x.shape}")
-        logger.debug(f"Targets: {targets.shape}")
-        logger.debug(f"Cell area: {cell_area.shape}")
+        # logger.debug(f"X: {x.shape}")
+        # logger.debug(f"Targets: {targets.shape}")
+        # logger.debug(f"Cell area: {cell_area.shape}")
 
         predictions = self(x)
         losses = self.compute_loss(x, predictions, targets, cell_area)

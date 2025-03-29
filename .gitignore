@@ -1,5 +1,6 @@
 .vscode/
 logs/
+checkpoints/
 lightning_logs/
 .lightning_studio/
 results/

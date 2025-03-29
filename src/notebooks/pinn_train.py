@@ -2,7 +2,7 @@
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
-from src.models.fno.pinn import PINNModel
+from src.models.fno import FNOPINN
 from src.data.module import MPIDataModule
 from src.utils.plotting import plot_layer, plot_long_cut
 
@@ -10,7 +10,7 @@ from src.utils.plotting import plot_layer, plot_long_cut
 datamodule = MPIDataModule(batch_size=1, num_workers=4)
 
 # %% Model setup
-model = PINNModel()
+model = FNOPINN()
 
 # %% Training configuration
 trainer = pl.Trainer(
