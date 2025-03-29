@@ -41,6 +41,10 @@ def set_seed(seed: int = 37) -> None:
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
 if __name__ == "__main__":
     for path in PATH.__dict__.values():
         if not os.path.exists(path):

@@ -9,6 +9,12 @@ from src.utils import set_seed
 
 set_seed()
 
+# Original settings
+# modes1=8,  # altitude modes
+# modes2=12,  # latitude modes
+# modes3=12,  # longitude modes
+# width=32,
+
 
 class PINNModel(pl.LightningModule):
 
@@ -20,10 +26,10 @@ class PINNModel(pl.LightningModule):
         in_channels=7,
         out_channels=6,  # 6 sizes
         # FNO settings
-        modes1=8,  # altitude modes
-        modes2=12,  # latitude modes
-        modes3=12,  # longitude modes
-        width=32,
+        modes1=4,  # altitude modes
+        modes2=6,  # latitude modes
+        modes3=6,  # longitude modes
+        width=8,
         num_layers=2,
         learning_rate=1e-3,
         weight_decay=1e-5,
@@ -274,7 +280,11 @@ class PINNModel(pl.LightningModule):
 if __name__ == "__main__":
     import time
 
+    from src.utils import count_parameters
+
     model = PINNModel()
+
+    print(f"Number of parameters: {count_parameters(model)}")
 
     # batch_size, features, altitude, latitude, longitude
     x = torch.randn(1, 7, 48, 600, 400, requires_grad=True)
