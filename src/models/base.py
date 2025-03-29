@@ -17,8 +17,7 @@ class Base(pl.LightningModule, ABC):
         in_channels=7,
         out_channels=6,
         mmr_weight=1.0,
-        conservation_weight=0.1,
-        physics_weight=0.1,
+        physics_weight=1.0,
         settling_velocities=None,
         include_coordinates=True,
         use_physics_loss=False,
@@ -157,20 +156,21 @@ class Base(pl.LightningModule, ABC):
         # L_mmr = (1/N) Σ (MMR pred - MMR true)^2
         losses["mmr"] = F.mse_loss(mmr_pred, mmr_true)
 
+        # NOTE: Turn out it varied over months.
         # L_mass = (∫∫∫ ρ·MMR dV - ∫∫ Emissions dA)²
         # Store the original emissions shape before summation
         # ρ is ignore since this is a loss
-        mass_true = (mmr_true * cell_area[None, None, None, :, :]).sum(dim=(-2, -1))
-        mass_pred = (mmr_pred * cell_area[None, None, None, :, :]).sum(dim=(-2, -1))
-        emissions_sum = (emissions * cell_area[None, None, None, :, :]).sum(
-            dim=(-2, -1)
-        )
+        # mass_true = (mmr_true * cell_area[None, None, None, :, :]).sum(dim=(-2, -1))
+        # mass_pred = (mmr_pred * cell_area[None, None, None, :, :]).sum(dim=(-2, -1))
+        # emissions_sum = (emissions * cell_area[None, None, None, :, :]).sum(
+        #     dim=(-2, -1)
+        # )
 
-        mass_conservation_error = (mass_pred - mass_true) - emissions_sum
-        total_mass = torch.abs(mass_true).mean() + torch.abs(emissions_sum).mean()
-        losses["mass_conservation"] = torch.mean(
-            (mass_conservation_error / (total_mass + 1e-8)) ** 2
-        )
+        # mass_conservation_error = (mass_pred - mass_true) - emissions_sum
+        # total_mass = torch.abs(mass_true).mean() + torch.abs(emissions_sum).mean()
+        # losses["mass_conservation"] = torch.mean(
+        #     (mass_conservation_error / (total_mass + 1e-8)) ** 2
+        # )
 
         # logger.info("Transport loss")
 
@@ -228,7 +228,7 @@ class Base(pl.LightningModule, ABC):
         # Total loss
         total_loss = (
             self.hparams.mmr_weight * losses["mmr"]
-            + self.hparams.conservation_weight * losses["mass_conservation"]
+            # + self.hparams.conservation_weight * losses["mass_conservation"]
             + self.hparams.physics_weight * losses["transport"]
         )
 
