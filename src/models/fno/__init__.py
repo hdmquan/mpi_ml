@@ -1,5 +1,5 @@
 from .core import FNOModel2D, FNOModel3D
-from .pinn import PINNModel
+from .pinn import FNOPINN
 
 
-__all__ = ["FNOModel2D", "FNOModel3D", "PINNModel"]
+__all__ = ["FNOModel2D", "FNOModel3D", "FNOPINN"]
