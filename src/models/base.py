@@ -2,6 +2,8 @@ import torch
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from abc import ABC, abstractmethod
+import torch.nn as nn
+from loguru import logger
 
 from src.utils import set_seed
 
@@ -232,3 +234,95 @@ class Base(pl.LightningModule, ABC):
 
         losses["total"] = total_loss
         return losses
+
+
+class LinearModel(Base):
+    def __init__(
+        self,
+        in_channels=7,
+        out_channels=6,
+        mmr_weight=1.0,
+        conservation_weight=0.1,
+        physics_weight=0.1,
+        use_physics_loss=False,
+        **kwargs,
+    ):
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            mmr_weight=mmr_weight,
+            conservation_weight=conservation_weight,
+            physics_weight=physics_weight,
+            use_physics_loss=use_physics_loss,
+            **kwargs,
+        )
+
+        # Simple linear layer that preserves spatial dimensions
+        self.linear = nn.Conv3d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x, coords=None):
+        # x shape: [batch_size, in_channels, altitude, latitude, longitude]
+        return self.linear(x)
+
+
+if __name__ == "__main__":
+    from src.data.module import MPIDataModule
+
+    # Initialize data
+    datamodule = MPIDataModule(batch_size=1)
+    datamodule.setup()
+
+    # Get one batch of data
+    train_loader = datamodule.train_dataloader()
+    x, mmr_true, cell_area = next(iter(train_loader))
+
+    # Create model instances - one with physics loss and one without
+    model_no_physics = LinearModel(
+        in_channels=7,
+        out_channels=6,
+        mmr_weight=1.0,
+        conservation_weight=0.1,
+        physics_weight=0.1,
+        use_physics_loss=False,
+    )
+
+    model_with_physics = LinearModel(
+        in_channels=7,
+        out_channels=6,
+        mmr_weight=1.0,
+        conservation_weight=0.1,
+        physics_weight=0.1,
+        use_physics_loss=True,
+    )
+
+    # Test forward pass
+    mmr_pred_no_physics = model_no_physics(x)
+    logger.info(f"Input shape: {x.shape}")
+    logger.info(f"Output shape: {mmr_pred_no_physics.shape}")
+    logger.info(f"Target shape: {mmr_true.shape}")
+
+    # Compute losses for both models
+    losses_no_physics = model_no_physics.compute_loss(
+        x, mmr_pred_no_physics, mmr_true, cell_area
+    )
+    logger.info("\nLosses without physics:")
+    for name, value in losses_no_physics.items():
+        logger.info(f"{name}: {value.item():.6f}")
+
+    mmr_pred_physics = model_with_physics(x)
+    losses_physics = model_with_physics.compute_physics_loss(
+        x, mmr_pred_physics, mmr_true, cell_area
+    )
+    logger.info("\nLosses with physics:")
+    for name, value in losses_physics.items():
+        logger.info(f"{name}: {value.item():.6f}")
+
+    # Analyze the predictions
+    logger.info("\nPrediction statistics:")
+    logger.info(
+        f"No physics - min: {mmr_pred_no_physics.min():.6f}, max: {mmr_pred_no_physics.max():.6f}"
+    )
+    logger.info(
+        f"With physics - min: {mmr_pred_physics.min():.6f}, max: {mmr_pred_physics.max():.6f}"
+    )
+    logger.info(f"True values - min: {mmr_true.min():.6f}, max: {mmr_true.max():.6f}")
