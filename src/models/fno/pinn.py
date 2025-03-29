@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 from loguru import logger
 
 from src.models.fno.core import FNOModel3D
-from src.models.base import BasePINN
+from src.models.base import Base
 from src.utils import set_seed
 
 set_seed()
@@ -17,7 +17,7 @@ set_seed()
 # width=32,
 
 
-class FNOPINN(BasePINN):
+class FNOPINN(Base):
 
     def __init__(
         self,

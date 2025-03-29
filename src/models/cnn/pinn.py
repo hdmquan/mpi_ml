@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.base import BasePINN
+from src.models.base import Base
 from src.utils import set_seed
 
 set_seed()
@@ -21,7 +21,7 @@ class ConvBlock(nn.Module):
         return self.relu(self.bn(self.conv(x)))
 
 
-class CNNPINN(BasePINN):
+class CNNPINN(Base):
     def __init__(
         self,
         in_channels=7,

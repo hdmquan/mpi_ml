@@ -10,7 +10,7 @@ from src.utils.plotting import plot_layer, plot_long_cut
 datamodule = MPIDataModule(batch_size=1, num_workers=4)
 
 # %% Model setup
-model = FNOPINN()
+model = FNOPINN(use_physics_loss=False)
 
 # %% Training configuration
 trainer = pl.Trainer(

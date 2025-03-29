@@ -3,36 +3,30 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 from abc import ABC, abstractmethod
 
-from loguru import logger
-
 from src.utils import set_seed
 
 set_seed()
 
 
-class BasePINN(pl.LightningModule, ABC):
+class Base(pl.LightningModule, ABC):
 
     def __init__(
         self,
-        # NOTE: Troposphere is not used since it's zeros
-        # Order: PS, (wind)U, (wind)V, T, Q, emissions
-        # Translate: Pressure, Wind East, Wind North, Temperature, Humidity, Source term
         in_channels=7,
-        out_channels=6,  # 6 sizes
-        # PINN loss weights
+        out_channels=6,
         mmr_weight=1.0,
         conservation_weight=0.1,
         physics_weight=0.1,
         settling_velocities=None,
         include_coordinates=True,
+        use_physics_loss=False,
         **kwargs,
     ):
         """
-        Abstract base PINN model class.
+        Abstract base model class.
         """
-        super(BasePINN, self).__init__()
-
-        # self.save_hyperparameters()
+        super(Base, self).__init__()
+        self.save_hyperparameters()
 
         if settling_velocities is None:
             # Default settling velocities for different plastic size bins (m/s)
@@ -44,8 +38,6 @@ class BasePINN(pl.LightningModule, ABC):
             self.settling_velocities = torch.tensor(
                 settling_velocities, dtype=torch.float32
             )
-
-        # Buffer the settling velocity
         self.register_buffer("settling_vel", self.settling_velocities)
 
     @abstractmethod
@@ -62,7 +54,68 @@ class BasePINN(pl.LightningModule, ABC):
         """
         pass
 
+    def training_step(self, batch, batch_idx) -> torch.Tensor:
+        x, targets, cell_area = batch
+        predictions = self(x)
+        losses = self.compute_loss(x, predictions, targets, cell_area)
+
+        # Log all loss components
+        for name, value in losses.items():
+            self.log(f"train_{name}", value, prog_bar=name == "total")
+
+        return losses["total"]
+
+    def validation_step(self, batch, batch_idx) -> torch.Tensor:
+        x, y_true, cell_area = batch
+        y_pred = self(x)
+        losses = self.compute_loss(x, y_pred, y_true, cell_area)
+
+        # Log all loss components
+        for name, value in losses.items():
+            self.log(f"val_{name}", value, prog_bar=name == "total")
+
+        return losses["total"]
+
+    def test_step(self, batch, batch_idx) -> torch.Tensor:
+        x, y_true, cell_area = batch
+        y_pred = self(x)
+        losses = self.compute_loss(x, y_pred, y_true, cell_area)
+        rmse = torch.sqrt(F.mse_loss(y_pred, y_true))
+
+        # Log all loss components
+        for name, value in losses.items():
+            self.log(f"test_{name}", value)
+        self.log("test_rmse", rmse)
+
+        return losses["total"]
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.hparams.learning_rate,
+            weight_decay=self.hparams.weight_decay,
+            betas=(0.9, 0.999),
+        )
+
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=100,
+            eta_min=self.hparams.learning_rate / 10,
+        )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": scheduler,
+            "monitor": "val_total",
+        }
+
     def compute_loss(self, x, mmr_pred, mmr_true, cell_area, dt=1.0):
+        if self.hparams.use_physics_loss:
+            return self.compute_physics_loss(x, mmr_pred, mmr_true, cell_area, dt)
+        else:
+            return {"total": F.mse_loss(mmr_pred, mmr_true)}
+
+    def compute_physics_loss(self, x, mmr_pred, mmr_true, cell_area, dt=1.0):
         """
         Compute physics-informed losses for MMR predictions.
 
@@ -179,68 +232,3 @@ class BasePINN(pl.LightningModule, ABC):
 
         losses["total"] = total_loss
         return losses
-
-    def training_step(self, batch, batch_idx) -> torch.Tensor:
-
-        x, targets, cell_area = batch
-
-        # logger.debug(f"X: {x.shape}")
-        # logger.debug(f"Targets: {targets.shape}")
-        # logger.debug(f"Cell area: {cell_area.shape}")
-
-        predictions = self(x)
-        losses = self.compute_loss(x, predictions, targets, cell_area)
-
-        for name, value in losses.items():
-            self.log(f"train_{name}", value, prog_bar=name == "total")
-
-        return losses["total"]
-
-    def validation_step(self, batch, batch_idx) -> torch.Tensor:
-
-        x, y_true, cell_area = batch
-
-        y_pred = self(x)
-        losses = self.compute_loss(x, y_pred, y_true, cell_area)
-
-        for name, value in losses.items():
-            self.log(f"val_{name}", value, prog_bar=name == "total")
-
-        return losses["total"]
-
-    def test_step(self, batch, batch_idx) -> torch.Tensor:
-
-        x, y_true, cell_area = batch
-
-        y_pred = self(x)
-        losses = self.compute_loss(x, y_pred, y_true, cell_area)
-
-        rmse = torch.sqrt(F.mse_loss(y_pred, y_true))
-
-        for name, value in losses.items():
-            self.log(f"test_{name}", value)
-
-        self.log("test_rmse", rmse)
-
-        return losses["total"]
-
-    def configure_optimizers(self):
-
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=self.hparams.learning_rate,
-            weight_decay=self.hparams.weight_decay,
-            betas=(0.9, 0.999),
-        )
-
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=100,  # TODO: Adjust
-            eta_min=self.hparams.learning_rate / 10,
-        )
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": scheduler,
-            "monitor": "val_total_loss",
-        }
