@@ -78,6 +78,10 @@ class MPIDataset(Dataset):
             if self.normalize:
                 self._compute_normalization_stats(h5f)
 
+        # Hardcoded MMR normalization values
+        self.mmr_min = -0.8929
+        self.mmr_max = 500.0
+
     def _prepare_indices(self):
         """
         For data splitting
@@ -151,7 +155,7 @@ class MPIDataset(Dataset):
             if self.output_std["mmr"][size_idx] == 0:
                 self.output_std["mmr"][size_idx] = 1.0
 
-            if self.only_mmr:
+            if not self.only_mmr:  # Only compute deposition stats if we're using them
                 dry_dep_data = h5f[
                     f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
                 ][train_indices]
@@ -229,7 +233,24 @@ class MPIDataset(Dataset):
                 dtype=DTYPE,
             )
 
+            for size_idx in range(n_particles):
+                mmr[size_idx] = h5f[
+                    f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"
+                ][time_idx].astype(DTYPE)
+
+                if self.normalize:
+                    # Use min-max normalization instead of mean-std
+                    mmr[size_idx] = (mmr[size_idx] - self.mmr_min) / (
+                        self.mmr_max - self.mmr_min
+                    )
+
+            # Convert to tensors
+            inputs = torch.from_numpy(inputs)
+            mmr = torch.from_numpy(mmr)
+
             if self.only_mmr:
+                return inputs, mmr
+            else:
                 dry_dep = np.zeros(
                     (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
                 )
@@ -237,13 +258,7 @@ class MPIDataset(Dataset):
                     (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
                 )
 
-            for size_idx in range(n_particles):
-                # Load and process one size at a time to reduce memory usage
-                mmr[size_idx] = h5f[
-                    f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"
-                ][time_idx].astype(DTYPE)
-
-                if self.only_mmr:
+                for size_idx in range(n_particles):
                     dry_dep[size_idx] = h5f[
                         f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
                     ][time_idx].astype(DTYPE)
@@ -251,12 +266,7 @@ class MPIDataset(Dataset):
                         f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
                     ][time_idx].astype(DTYPE)
 
-                if self.normalize:
-                    mmr[size_idx] = (
-                        mmr[size_idx] - self.output_mean["mmr"][size_idx]
-                    ) / self.output_std["mmr"][size_idx]
-
-                    if self.only_mmr:
+                    if self.normalize:
                         dry_dep[size_idx] = (
                             dry_dep[size_idx] - self.output_mean["dry_dep"][size_idx]
                         ) / self.output_std["dry_dep"][size_idx]
@@ -264,33 +274,9 @@ class MPIDataset(Dataset):
                             wet_dep[size_idx] - self.output_mean["wet_dep"][size_idx]
                         ) / self.output_std["wet_dep"][size_idx]
 
-            # Convert to tensors (already float32)
-            inputs = torch.from_numpy(inputs)
-            mmr = torch.from_numpy(mmr)
-
-            if self.only_mmr:
                 dry_dep = torch.from_numpy(dry_dep)
                 wet_dep = torch.from_numpy(wet_dep)
-
-            # logger.debug(f"Inputs shape: {inputs.shape}")
-            # logger.debug(f"MMR shape: {mmr.shape}")
-            # logger.debug(f"Dry dep shape: {dry_dep.shape}")
-            # logger.debug(f"Wet dep shape: {wet_dep.shape}")
-
-            # Use stored cell_area tensor instead of creating new one each time
-            if not hasattr(self, "cell_area_tensor"):
-                self.cell_area_tensor = torch.tensor(
-                    self.cell_area, dtype=torch.float32
-                )
-
-            if self.reverse_lev:
-                inputs = torch.flip(inputs, dims=(1,))
-                mmr = torch.flip(mmr, dims=(1,))
-
-            if self.only_mmr:
-                return inputs, mmr, self.cell_area_tensor
-            else:
-                return inputs, (mmr, dry_dep, wet_dep), self.cell_area_tensor
+                return inputs, (mmr, dry_dep, wet_dep)
 
     def _create_coordinate_grids(self):
         """Pre-compute coordinate grids once to save memory and computation"""

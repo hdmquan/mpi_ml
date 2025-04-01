@@ -7,14 +7,14 @@ from src.data.module import MPIDataModule
 from src.utils.plotting import plot_layer, plot_long_cut
 
 # %% Data
-datamodule = MPIDataModule(batch_size=1, num_workers=4)
+datamodule = MPIDataModule(include_coordinates=False, batch_size=3, num_workers=4)
 
 # %% Model setup
-model = FNOPINN(use_physics_loss=True)
+model = FNOPINN(use_physics_loss=False)
 
 # %% Training configuration
 trainer = pl.Trainer(
-    max_epochs=10,
+    max_epochs=100,
     accelerator="cuda" if torch.cuda.is_available() else "cpu",
     callbacks=[
         ModelCheckpoint(
@@ -23,7 +23,10 @@ trainer = pl.Trainer(
             monitor="val_total",
             mode="min",
             save_top_k=1,
-        )
+        ),
+        pl.callbacks.early_stopping.EarlyStopping(
+            monitor="val_total", patience=5, mode="min"
+        ),
     ],
     enable_progress_bar=True,
 )

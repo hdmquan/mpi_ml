@@ -89,14 +89,10 @@ class FNOModel2D(nn.Module):
         modes2=12,
         width=32,
         num_layers=2,
-        include_coordinates=True,
     ):
         super().__init__()
 
-        self.include_coordinates = include_coordinates
-        input_dim = in_channels + (2 if include_coordinates else 0)
-
-        self.fc_in = nn.Conv2d(input_dim, width, kernel_size=1)
+        self.fc_in = nn.Conv2d(in_channels, width, kernel_size=1)
 
         self.fno_blocks = nn.ModuleList(
             [FNOBlock2D(width, modes1, modes2) for _ in range(num_layers)]
@@ -105,9 +101,7 @@ class FNOModel2D(nn.Module):
         self.fc_out = nn.Conv2d(width, out_channels, kernel_size=1)
         self.activation = nn.Softplus()
 
-    def forward(self, x, coords=None):
-        if self.include_coordinates and coords is not None:
-            x = torch.cat([x, coords], dim=1)
+    def forward(self, x):
 
         x = self.fc_in(x)
 
@@ -214,21 +208,17 @@ class FNOBlock3D(nn.Module):
 class FNOModel3D(nn.Module):
     def __init__(
         self,
-        in_channels=7,
+        in_channels=5,
         out_channels=6,
         modes1=8,  # altitude modes
         modes2=12,  # latitude modes
         modes3=12,  # longitude modes
         width=32,
         num_layers=2,
-        include_coordinates=True,
     ):
         super().__init__()
 
-        self.include_coordinates = include_coordinates
-        input_dim = in_channels + (3 if include_coordinates else 0)
-
-        self.fc_in = nn.Conv3d(input_dim, width, kernel_size=1)
+        self.fc_in = nn.Conv3d(in_channels, width, kernel_size=1)
 
         self.fno_blocks = nn.ModuleList(
             [FNOBlock3D(width, modes1, modes2, modes3) for _ in range(num_layers)]
@@ -237,10 +227,7 @@ class FNOModel3D(nn.Module):
         self.fc_out = nn.Conv3d(width, out_channels, kernel_size=1)
         self.activation = nn.Softplus()
 
-    def forward(self, x, coords=None):
-        if self.include_coordinates and coords is not None:
-            x = torch.cat([x, coords], dim=1)
-
+    def forward(self, x):
         x = self.fc_in(x)
 
         for block in self.fno_blocks:

@@ -56,9 +56,9 @@ class Base(pl.LightningModule, ABC):
         pass
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
-        x, targets, cell_area = batch
+        x, targets = batch
         predictions = self(x)
-        losses = self.compute_loss(x, predictions, targets, cell_area)
+        losses = self.compute_loss(x, predictions, targets)
 
         # Log all loss components
         for name, value in losses.items():
@@ -67,9 +67,9 @@ class Base(pl.LightningModule, ABC):
         return losses["total"]
 
     def validation_step(self, batch, batch_idx) -> torch.Tensor:
-        x, y_true, cell_area = batch
+        x, y_true = batch
         y_pred = self(x)
-        losses = self.compute_loss(x, y_pred, y_true, cell_area)
+        losses = self.compute_loss(x, y_pred, y_true)
 
         # Log all loss components
         for name, value in losses.items():
@@ -78,9 +78,9 @@ class Base(pl.LightningModule, ABC):
         return losses["total"]
 
     def test_step(self, batch, batch_idx) -> torch.Tensor:
-        x, y_true, cell_area = batch
+        x, y_true = batch
         y_pred = self(x)
-        losses = self.compute_loss(x, y_pred, y_true, cell_area)
+        losses = self.compute_loss(x, y_pred, y_true)
         rmse = torch.sqrt(F.mse_loss(y_pred, y_true))
 
         # Log all loss components
@@ -110,13 +110,13 @@ class Base(pl.LightningModule, ABC):
             "monitor": "val_total",
         }
 
-    def compute_loss(self, x, mmr_pred, mmr_true, cell_area, dt=1.0):
+    def compute_loss(self, x, mmr_pred, mmr_true, dt=1.0):
         if self.hparams.use_physics_loss:
-            return self.compute_physics_loss(x, mmr_pred, mmr_true, cell_area, dt)
+            return self.compute_physics_loss(x, mmr_pred, mmr_true, dt)
         else:
             return {"total": F.mse_loss(mmr_pred, mmr_true)}
 
-    def compute_physics_loss(self, x, mmr_pred, mmr_true, cell_area, dt=1.0):
+    def compute_physics_loss(self, x, mmr_pred, mmr_true, dt=1.0):
         """
         Compute physics-informed losses for MMR predictions.
 
@@ -274,7 +274,7 @@ if __name__ == "__main__":
 
     # Get one batch of data
     train_loader = datamodule.train_dataloader()
-    x, mmr_true, cell_area = next(iter(train_loader))
+    x, mmr_true = next(iter(train_loader))
 
     # Create model instances - one with physics loss and one without
     model_no_physics = LinearModel(
@@ -302,16 +302,14 @@ if __name__ == "__main__":
     logger.info(f"Target shape: {mmr_true.shape}")
 
     # Compute losses for both models
-    losses_no_physics = model_no_physics.compute_loss(
-        x, mmr_pred_no_physics, mmr_true, cell_area
-    )
+    losses_no_physics = model_no_physics.compute_loss(x, mmr_pred_no_physics, mmr_true)
     logger.info("\nLosses without physics:")
     for name, value in losses_no_physics.items():
         logger.info(f"{name}: {value.item():.6f}")
 
     mmr_pred_physics = model_with_physics(x)
     losses_physics = model_with_physics.compute_physics_loss(
-        x, mmr_pred_physics, mmr_true, cell_area
+        x, mmr_pred_physics, mmr_true
     )
     logger.info("\nLosses with physics:")
     for name, value in losses_physics.items():
