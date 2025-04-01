@@ -39,7 +39,7 @@ test_results = trainer.test(model, datamodule=datamodule)
 
 # %% Visualization
 batch = next(iter(datamodule.test_dataloader()))
-x, y, cell_area = [b.to(model.device) for b in batch]
+x, y = [b.to(model.device) for b in batch]
 y_pred = model(x)
 
 # Ground truth
