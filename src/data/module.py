@@ -53,7 +53,6 @@ class MPIDataset(Dataset):
 
         # Metadata
         with h5py.File(self.h5_file, "r") as h5f:
-
             self.lats = h5f["metadata/lat"][:]
             self.lons = h5f["metadata/lon"][:]
             self.settling_velocities = h5f["metadata/settling_velocity"][:]
@@ -77,10 +76,13 @@ class MPIDataset(Dataset):
 
             if self.normalize:
                 self._compute_normalization_stats(h5f)
-
-        # Hardcoded MMR normalization values
-        self.mmr_min = -0.8929
-        self.mmr_max = 500.0
+                # Try to load existing normalization parameters
+                if not self._load_mmr_stats(h5f):
+                    # If not found, compute them
+                    self._compute_mmr_stats(h5f)
+                    # Only save if we're in training mode and parameters don't exist
+                    if self.mode == "train":
+                        self._save_mmr_stats(h5f)
 
     def _prepare_indices(self):
         """
@@ -155,7 +157,8 @@ class MPIDataset(Dataset):
             if self.output_std["mmr"][size_idx] == 0:
                 self.output_std["mmr"][size_idx] = 1.0
 
-            if not self.only_mmr:  # Only compute deposition stats if we're using them
+            # TODO: Scaling. If mass conservation is enforced, we need to unify the mmr and deposition
+            if not self.only_mmr:
                 dry_dep_data = h5f[
                     f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
                 ][train_indices]
@@ -173,13 +176,80 @@ class MPIDataset(Dataset):
                 if self.output_std["wet_dep"][size_idx] == 0:
                     self.output_std["wet_dep"][size_idx] = 1.0
 
+    def _compute_mmr_stats(self, h5f):
+        """Compute MMR statistics from training data"""
+        train_indices = self.indices if self.mode == "train" else None
+        if train_indices is None:
+            time_dim = h5f["metadata/time"].shape[0]
+            if self.shuffle:
+                shuffled_indices = np.random.permutation(time_dim)
+            else:
+                shuffled_indices = np.arange(time_dim)
+            train_size = int(time_dim * self.split[0])
+            train_indices = np.sort(shuffled_indices[:train_size])
+
+        n_particles = len(self.settling_velocities)
+        self.mmr_min = float("inf")
+        self.mmr_max = float("-inf")
+
+        # First pass: compute log statistics
+        for size_idx in range(n_particles):
+            mmr_data = h5f[f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"][
+                train_indices
+            ]
+            # Add small constant to avoid log(0)
+            mmr_data = mmr_data + 1e-20
+            log_mmr_data = np.log10(mmr_data)
+            self.mmr_min = min(self.mmr_min, float(np.min(log_mmr_data)))
+            self.mmr_max = max(self.mmr_max, float(np.max(log_mmr_data)))
+
+        # Add small epsilon to avoid division by zero
+        if self.mmr_max == self.mmr_min:
+            self.mmr_max += 1e-10
+
+    def _save_mmr_stats(self, h5f):
+        """Save MMR statistics to HDF5 metadata"""
+        # Close the current file handle
+        h5f.close()
+
+        # Reopen in append mode
+        with h5py.File(self.h5_file, "a") as h5f:
+            # Create metadata group if it doesn't exist
+            if "normalization" not in h5f:
+                h5f.create_group("normalization")
+
+            # Save MMR normalization parameters
+            h5f["normalization/mmr_min"] = self.mmr_min
+            h5f["normalization/mmr_max"] = self.mmr_max
+            h5f["normalization/mmr_epsilon"] = 1e-20  # Save the epsilon value used
+
+    def _load_mmr_stats(self, h5f):
+        """Load MMR statistics from HDF5 metadata"""
+        if "normalization" in h5f and "mmr_min" in h5f["normalization"]:
+            self.mmr_min = float(h5f["normalization/mmr_min"][()])
+            self.mmr_max = float(h5f["normalization/mmr_max"][()])
+            self.mmr_epsilon = float(h5f["normalization/mmr_epsilon"][()])
+            return True
+        return False
+
+    def denormalize_mmr(self, mmr_normalized):
+        """Convert normalized MMR back to original scale"""
+        # Reverse min-max normalization
+        mmr_log = mmr_normalized * (self.mmr_max - self.mmr_min) + self.mmr_min
+        # Reverse log transform
+        mmr = 10**mmr_log - self.mmr_epsilon
+        return mmr
+
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
+        # print(f"\n=== Starting __getitem__ with idx {idx} ===")
         time_idx = self.indices[idx]
+        # print(f"Using time_idx: {time_idx}")
 
         with h5py.File(self.h5_file, "r") as h5f:
+            # print("Successfully opened h5 file")
             # Get 2D fields - slice directly instead of loading entire arrays
             ps = h5f["inputs/PS"][time_idx].astype(DTYPE)
             if self.include_troplev:
@@ -190,6 +260,7 @@ class MPIDataset(Dataset):
             v = h5f["inputs/V"][time_idx].astype(DTYPE)
             t = h5f["inputs/T"][time_idx].astype(DTYPE)
             q = h5f["inputs/Q"][time_idx].astype(DTYPE)
+            # print("Loaded input fields")
 
             if self.normalize:
                 ps = (ps - self.input_mean["PS"]) / self.input_std["PS"]
@@ -201,6 +272,7 @@ class MPIDataset(Dataset):
                 v = (v - self.input_mean["V"]) / self.input_std["V"]
                 t = (t - self.input_mean["T"]) / self.input_std["T"]
                 q = (q - self.input_mean["Q"]) / self.input_std["Q"]
+                # print("Normalized input fields")
 
             # Create sparse coordinates once during initialization instead of for each item
             if not hasattr(self, "lat_grid_3d") and self.include_coordinates:
@@ -223,26 +295,49 @@ class MPIDataset(Dataset):
                 inputs = np.concatenate(
                     [inputs, self.lat_grid_3d, self.lon_grid_3d], axis=0
                 )
+            # print("Prepared input tensor")
 
             n_particles = len(self.settling_velocities)
             n_levels = shape[0]  # Number of vertical levels
+            # print(f"Number of particles: {n_particles}, Number of levels: {n_levels}")
 
             # Initialize with float32 for smaller memory footprint
             mmr = np.zeros(
                 (n_particles, n_levels, len(self.lats), len(self.lons)),
                 dtype=DTYPE,
             )
+            # print("Initialized MMR array")
 
             for size_idx in range(n_particles):
+                # print(f"\nProcessing particle {size_idx + 1}/{n_particles}")
                 mmr[size_idx] = h5f[
                     f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"
                 ][time_idx].astype(DTYPE)
 
+                if size_idx == 0:
+                    # print(f"Raw MMR values:")
+                    # print(f"Min: {mmr[size_idx].min()}")
+                    # print(f"Max: {mmr[size_idx].max()}")
+                    # print(f"Mean: {mmr[size_idx].mean()}")
+                    # print(f"Unique values: {np.unique(mmr[size_idx])[:5]}")
+                    pass
+
                 if self.normalize:
-                    # Use min-max normalization instead of mean-std
+                    # Add small constant to avoid log(0)
+                    mmr[size_idx] = mmr[size_idx] + 1e-20
+                    # Log transform
+                    mmr[size_idx] = np.log10(mmr[size_idx])
+                    # Min-max normalize
                     mmr[size_idx] = (mmr[size_idx] - self.mmr_min) / (
                         self.mmr_max - self.mmr_min
                     )
+                    if size_idx == 0:
+                        # print(f"After normalization:")
+                        # print(f"Min: {mmr[size_idx].min()}")
+                        # print(f"Max: {mmr[size_idx].max()}")
+                        # print(f"Mean: {mmr[size_idx].mean()}")
+                        # print(f"Unique values: {np.unique(mmr[size_idx])[:5]}")
+                        pass
 
             # Convert to tensors
             inputs = torch.from_numpy(inputs)
@@ -408,29 +503,30 @@ class MPIDataModule(pl.LightningDataModule):
 
 
 if __name__ == "__main__":
-    from src.utils.memory import print_memory_usage, print_tensor_memory
+    from src.utils.memory import print_memory_allocated, print_tensor_memory
 
-    print_memory_usage()
+    print_memory_allocated()
 
     datamodule = MPIDataModule()
     datamodule.setup()
 
-    print_memory_usage()
+    print_memory_allocated()
 
     train_dataloader = datamodule.train_dataloader()
 
     print(len(train_dataloader))
 
     for batch in train_dataloader:
-        print(batch[0].shape)  # [1, 8, 48, 384, 576]
-        print_tensor_memory(batch[0])
-        print(batch[1].shape)  # [1, 6, 48, 384, 576]
-        print_tensor_memory(batch[1])
+        X, y = batch
+        print(X.shape)  # [1, 8, 48, 384, 576]
+        print_tensor_memory(X)
+        print(y.shape)  # [1, 6, 48, 384, 576]
+        print_tensor_memory(y)
         # print(batch[1][0].shape)  # [1, 6, 48, 384, 576]
         # print(batch[1][1].shape)  # [1, 6, 384, 576]
         # print(batch[1][2].shape)  # [1, 6, 384, 576]
-        print(batch[2].shape)  # [1, 384, 576]
-        print_tensor_memory(batch[2])
-        print_memory_usage()
+        print_memory_allocated()
+
+        print(f"Y range: {y.min()} - {y.max()}")
 
         break

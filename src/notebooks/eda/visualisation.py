@@ -18,8 +18,7 @@ loader.setup()
 data = next(iter(loader.train_dataloader()))
 
 # %%
-X = data[0][:, :-2, :, :, :]
-Y = data[1][0]
+X, Y = data
 
 # %%
 # [1, 6, 48, 384, 576]
@@ -28,7 +27,7 @@ print(X.shape)
 b, c, l, x, y = Y.shape
 
 # %% Level-by-level inspection
-lev = 1
+lev = 48
 
 plot_layer(Y, lev - 1)
 
