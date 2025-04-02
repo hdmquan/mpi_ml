@@ -78,6 +78,8 @@ class MPIDataset(Dataset):
 
             self._normalize(h5f, force_normalize=force_normalize)
 
+        self._file_handle = None
+
     def _prepare_indices(self):
         """
         For data splitting
@@ -298,130 +300,131 @@ class MPIDataset(Dataset):
 
         return True
 
+    def _open_file(self):
+        """Lazily open the file handle when needed"""
+        if self._file_handle is None:
+            self._file_handle = h5py.File(self.h5_file, "r")
+        return self._file_handle
+
+    def __del__(self):
+        """Clean up file handle when object is destroyed"""
+        if self._file_handle is not None:
+            self._file_handle.close()
+            self._file_handle = None
+
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        # print(f"\n=== Starting __getitem__ with idx {idx} ===")
         time_idx = self.indices[idx]
-        # print(f"Using time_idx: {time_idx}")
+        h5f = self._open_file()
 
-        with h5py.File(self.h5_file, "r") as h5f:
-            # print("Successfully opened h5 file")
-            # Get 2D fields - slice directly instead of loading entire arrays
-            ps = h5f["inputs/PS"][time_idx].astype(DTYPE)
+        # Input fields processing is fine
+        ps = h5f["inputs/PS"][time_idx]
+        u = h5f["inputs/U"][time_idx]
+        v = h5f["inputs/V"][time_idx]
+        t = h5f["inputs/T"][time_idx]
+        q = h5f["inputs/Q"][time_idx]
+
+        if self.include_troplev:
+            troplev = h5f["inputs/TROPLEV"][time_idx]
+
+        # Convert to torch tensors immediately
+        ps = torch.from_numpy(ps).to(torch.float32)
+        u = torch.from_numpy(u).to(torch.float32)
+        v = torch.from_numpy(v).to(torch.float32)
+        t = torch.from_numpy(t).to(torch.float32)
+        q = torch.from_numpy(q).to(torch.float32)
+
+        if self.include_troplev:
+            troplev = torch.from_numpy(troplev).to(torch.float32)
+
+        # Normalize in tensor space
+        if self.normalize:
+            ps = (ps - self.input_mean["PS"]) / self.input_std["PS"]
+            u = (u - self.input_mean["U"]) / self.input_std["U"]
+            v = (v - self.input_mean["V"]) / self.input_std["V"]
+            t = (t - self.input_mean["T"]) / self.input_std["T"]
+            q = (q - self.input_mean["Q"]) / self.input_std["Q"]
+
             if self.include_troplev:
-                troplev = h5f["inputs/TROPLEV"][time_idx].astype(DTYPE)
+                troplev = (troplev - self.input_mean["TROPLEV"]) / self.input_std[
+                    "TROPLEV"
+                ]
 
-            # Get 3D fields - slice directly and convert to float32
-            u = h5f["inputs/U"][time_idx].astype(DTYPE)
-            v = h5f["inputs/V"][time_idx].astype(DTYPE)
-            t = h5f["inputs/T"][time_idx].astype(DTYPE)
-            q = h5f["inputs/Q"][time_idx].astype(DTYPE)
-            # print("Loaded input fields")
+        # Repeat to match shape
+        shape = u.shape
+        ps_3d = ps.unsqueeze(0).repeat(shape[0], 1, 1)
+
+        # Stack inputs
+        if self.include_troplev:
+            troplev_3d = troplev.unsqueeze(0).repeat(shape[0], 1, 1)
+            inputs = torch.stack([ps_3d, u, v, t, q, troplev_3d], dim=0)
+        else:
+            inputs = torch.stack([ps_3d, u, v, t, q], dim=0)
+
+        # Process MMR data
+        n_particles = len(self.settling_velocities)
+        mmr_list = []
+
+        for size_idx in range(n_particles):
+            # Get raw MMR data as numpy array first to ensure consistency with original code
+            mmr_raw = h5f[f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"][
+                time_idx
+            ]
 
             if self.normalize:
-                ps = (ps - self.input_mean["PS"]) / self.input_std["PS"]
-                if self.include_troplev:
-                    troplev = (troplev - self.input_mean["TROPLEV"]) / self.input_std[
-                        "TROPLEV"
-                    ]
-                u = (u - self.input_mean["U"]) / self.input_std["U"]
-                v = (v - self.input_mean["V"]) / self.input_std["V"]
-                t = (t - self.input_mean["T"]) / self.input_std["T"]
-                q = (q - self.input_mean["Q"]) / self.input_std["Q"]
-                # print("Normalized input fields")
+                # Add epsilon in numpy domain, then convert to log
+                mmr_data = np.log10(mmr_raw + self.mmr_epsilon)
+                # Apply min-max normalization
+                mmr_data = (mmr_data - self.mmr_min) / (self.mmr_max - self.mmr_min)
+                # Convert to tensor after all numpy processing
+                mmr_data = torch.from_numpy(mmr_data).to(torch.float32)
+            else:
+                mmr_data = torch.from_numpy(mmr_raw).to(torch.float32)
 
-            # Repeat the 2D fields to match the 3D field shape
-            shape = u.shape
-            ps_3d = np.reshape(ps, (1,) + ps.shape).repeat(shape[0], axis=0)
-            if self.include_troplev:
-                troplev_3d = np.reshape(troplev, (1,) + troplev.shape).repeat(
-                    shape[0], axis=0
-                )
+            mmr_list.append(mmr_data)
 
-            # Stack inputs with reduced memory footprint
-            inputs = np.stack([ps_3d, u, v, t, q], axis=0)
-            if self.include_troplev:
-                inputs = np.concatenate([inputs, troplev_3d], axis=0)
+        mmr = torch.stack(mmr_list)
 
-            # print("Prepared input tensor")
-
-            n_particles = len(self.settling_velocities)
-            n_levels = shape[0]  # Number of vertical levels
-            # print(f"Number of particles: {n_particles}, Number of levels: {n_levels}")
-
-            # Initialize with float32 for smaller memory footprint
-            mmr = np.zeros(
-                (n_particles, n_levels, len(self.lats), len(self.lons)),
-                dtype=DTYPE,
-            )
-            # print("Initialized MMR array")
+        if self.only_mmr:
+            return inputs, mmr
+        else:
+            # Process deposition data
+            dry_dep_list = []
+            wet_dep_list = []
 
             for size_idx in range(n_particles):
-                # print(f"\nProcessing particle {size_idx + 1}/{n_particles}")
-                mmr[size_idx] = h5f[
-                    f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"
-                ][time_idx].astype(DTYPE)
-
-                if size_idx == 0:
-                    # print(f"Raw MMR values:")
-                    # print(f"Min: {mmr[size_idx].min()}")
-                    # print(f"Max: {mmr[size_idx].max()}")
-                    # print(f"Mean: {mmr[size_idx].mean()}")
-                    # print(f"Unique values: {np.unique(mmr[size_idx])[:5]}")
-                    pass
+                # Get raw data as numpy arrays
+                dry_raw = h5f[
+                    f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
+                ][time_idx]
+                wet_raw = h5f[
+                    f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
+                ][time_idx]
 
                 if self.normalize:
-                    # Add small constant to avoid log(0)
-                    mmr[size_idx] = mmr[size_idx] + 1e-20
-                    # Log transform
-                    mmr[size_idx] = np.log10(mmr[size_idx])
-                    # Min-max normalize
-                    mmr[size_idx] = (mmr[size_idx] - self.mmr_min) / (
-                        self.mmr_max - self.mmr_min
-                    )
-                    if size_idx == 0:
-                        # print(f"After normalization:")
-                        # print(f"Min: {mmr[size_idx].min()}")
-                        # print(f"Max: {mmr[size_idx].max()}")
-                        # print(f"Mean: {mmr[size_idx].mean()}")
-                        # print(f"Unique values: {np.unique(mmr[size_idx])[:5]}")
-                        pass
+                    # Normalize in numpy domain to ensure consistency
+                    dry_data = (
+                        dry_raw - self.output_mean["dry_dep"][size_idx]
+                    ) / self.output_std["dry_dep"][size_idx]
+                    wet_data = (
+                        wet_raw - self.output_mean["wet_dep"][size_idx]
+                    ) / self.output_std["wet_dep"][size_idx]
+                    # Convert to tensors after normalization
+                    dry_data = torch.from_numpy(dry_data).to(torch.float32)
+                    wet_data = torch.from_numpy(wet_data).to(torch.float32)
+                else:
+                    dry_data = torch.from_numpy(dry_raw).to(torch.float32)
+                    wet_data = torch.from_numpy(wet_raw).to(torch.float32)
 
-            # Convert to tensors
-            inputs = torch.from_numpy(inputs)
-            mmr = torch.from_numpy(mmr)
+                dry_dep_list.append(dry_data)
+                wet_dep_list.append(wet_data)
 
-            if self.only_mmr:
-                return inputs, mmr
-            else:
-                dry_dep = np.zeros(
-                    (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
-                )
-                wet_dep = np.zeros(
-                    (n_particles, len(self.lats), len(self.lons)), dtype=DTYPE
-                )
+            dry_dep = torch.stack(dry_dep_list)
+            wet_dep = torch.stack(wet_dep_list)
 
-                for size_idx in range(n_particles):
-                    dry_dep[size_idx] = h5f[
-                        f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
-                    ][time_idx].astype(DTYPE)
-                    wet_dep[size_idx] = h5f[
-                        f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
-                    ][time_idx].astype(DTYPE)
-
-                    if self.normalize:
-                        dry_dep[size_idx] = (
-                            dry_dep[size_idx] - self.output_mean["dry_dep"][size_idx]
-                        ) / self.output_std["dry_dep"][size_idx]
-                        wet_dep[size_idx] = (
-                            wet_dep[size_idx] - self.output_mean["wet_dep"][size_idx]
-                        ) / self.output_std["wet_dep"][size_idx]
-
-                dry_dep = torch.from_numpy(dry_dep)
-                wet_dep = torch.from_numpy(wet_dep)
-                return inputs, (mmr, dry_dep, wet_dep)
+            return inputs, (mmr, dry_dep, wet_dep)
 
 
 class MPIDataModule(pl.LightningDataModule):
@@ -431,6 +434,7 @@ class MPIDataModule(pl.LightningDataModule):
         batch_size: int = 1,
         num_workers: int = 4,
         split: Tuple[float, float, float] = (0.5, 0.25, 0.25),
+        shuffle: bool = True,
         normalize: bool = True,
         include_coordinates: bool = True,
         **kwargs,
@@ -442,6 +446,7 @@ class MPIDataModule(pl.LightningDataModule):
         self.split = split
         self.normalize = normalize
         self.include_coordinates = include_coordinates
+        self.shuffle = shuffle
 
         self.h5_file = PATH.PROCESSED_DATA / "mpidata.h5"
 
@@ -465,7 +470,7 @@ class MPIDataModule(pl.LightningDataModule):
                 split=self.split,
                 normalize=self.normalize,
                 include_coordinates=self.include_coordinates,
-                shuffle=True,
+                shuffle=self.shuffle,
                 force_normalize=False,
             )
 
@@ -475,7 +480,7 @@ class MPIDataModule(pl.LightningDataModule):
                 split=self.split,
                 normalize=self.normalize,
                 include_coordinates=self.include_coordinates,
-                shuffle=True,
+                shuffle=self.shuffle,
                 force_normalize=False,
             )
 
@@ -486,7 +491,7 @@ class MPIDataModule(pl.LightningDataModule):
                 split=self.split,
                 normalize=self.normalize,
                 include_coordinates=self.include_coordinates,
-                shuffle=True,
+                shuffle=self.shuffle,
                 force_normalize=False,
             )
 
@@ -494,7 +499,7 @@ class MPIDataModule(pl.LightningDataModule):
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=self.shuffle,
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=True if self.num_workers > 0 else False,
@@ -504,7 +509,7 @@ class MPIDataModule(pl.LightningDataModule):
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
-            shuffle=False,
+            shuffle=self.shuffle,
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=True if self.num_workers > 0 else False,
@@ -619,7 +624,7 @@ if __name__ == "__main__":
 
     print_memory_allocated()
 
-    datamodule = MPIDataModule()
+    datamodule = MPIDataModule(shuffle=False)
     datamodule.setup()
 
     print_memory_allocated()
