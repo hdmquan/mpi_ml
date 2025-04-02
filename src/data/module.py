@@ -27,6 +27,7 @@ class MPIDataset(Dataset):
         reverse_lev: bool = True,
         include_troplev: bool = False,
         only_mmr: bool = True,
+        force_normalize: bool = False,
     ):
         """
         Args:
@@ -49,6 +50,7 @@ class MPIDataset(Dataset):
         self.reverse_lev = reverse_lev
         self.include_troplev = include_troplev
         self.only_mmr = only_mmr
+        self.force_normalize = force_normalize
         self._prepare_indices()
 
         # Metadata
@@ -74,15 +76,7 @@ class MPIDataset(Dataset):
                 * np.cos(np.radians(lat_grid))
             )
 
-            if self.normalize:
-                self._compute_normalization_stats(h5f)
-                # Try to load existing normalization parameters
-                if not self._load_mmr_stats(h5f):
-                    # If not found, compute them
-                    self._compute_mmr_stats(h5f)
-                    # Only save if we're in training mode and parameters don't exist
-                    if self.mode == "train":
-                        self._save_mmr_stats(h5f)
+            self._normalize(h5f, force_normalize=force_normalize)
 
     def _prepare_indices(self):
         """
@@ -114,25 +108,99 @@ class MPIDataset(Dataset):
 
             self.num_samples = len(self.indices)
 
-    def _compute_normalization_stats(self, h5f):
-        # Avoid leakage
-        train_indices = self.indices if self.mode == "train" else None
+    def _normalize(self, h5f, force_normalize: bool = False):
+        """Compute and cache normalization statistics for the dataset
 
+        Args:
+            h5f: Open h5py file handle
+            force_normalize: If True, recompute normalization even if cached
+        """
+        # Check if normalization exists and we're not forcing recomputation
+        if not force_normalize and "normalization" in h5f:
+            print("Loading existing normalization stats")
+            # Load existing normalization stats
+            norm_group = h5f["normalization"]
+
+            # Load input stats
+            self.input_mean = {}
+            self.input_std = {}
+            met_vars = ["PS", "U", "V", "T", "Q"]
+            if self.include_troplev:
+                met_vars.append("TROPLEV")
+
+            for var in met_vars:
+                if f"{var}_mean" in norm_group and f"{var}_std" in norm_group:
+                    self.input_mean[var] = float(norm_group[f"{var}_mean"][()])
+                    self.input_std[var] = float(norm_group[f"{var}_std"][()])
+                else:
+                    return False  # Missing some stats, need to recompute
+
+            # Load output stats
+            self.output_mean = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
+            self.output_std = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
+
+            n_particles = len(self.settling_velocities)
+            for size_idx in range(n_particles):
+                # Load MMR stats
+                if (
+                    f"mmr_{size_idx}_mean" in norm_group
+                    and f"mmr_{size_idx}_std" in norm_group
+                ):
+                    self.output_mean["mmr"][size_idx] = float(
+                        norm_group[f"mmr_{size_idx}_mean"][()]
+                    )
+                    self.output_std["mmr"][size_idx] = float(
+                        norm_group[f"mmr_{size_idx}_std"][()]
+                    )
+                else:
+                    return False
+
+                if not self.only_mmr:
+                    # Load deposition stats
+                    for dep_type in ["dry_dep", "wet_dep"]:
+                        if (
+                            f"{dep_type}_{size_idx}_mean" in norm_group
+                            and f"{dep_type}_{size_idx}_std" in norm_group
+                        ):
+                            self.output_mean[dep_type][size_idx] = float(
+                                norm_group[f"{dep_type}_{size_idx}_mean"][()]
+                            )
+                            self.output_std[dep_type][size_idx] = float(
+                                norm_group[f"{dep_type}_{size_idx}_std"][()]
+                            )
+                        else:
+                            return False
+
+            # Load MMR log-scale stats
+            if (
+                "mmr_min" in norm_group
+                and "mmr_max" in norm_group
+                and "mmr_epsilon" in norm_group
+            ):
+                self.mmr_min = float(norm_group["mmr_min"][()])
+                self.mmr_max = float(norm_group["mmr_max"][()])
+                self.mmr_epsilon = float(norm_group["mmr_epsilon"][()])
+            else:
+                return False
+
+            return True
+
+        print("Computing new normalization stats")
+        # Compute new normalization stats
+        # Get training indices
+        train_indices = self.indices if self.mode == "train" else None
         if train_indices is None:
             time_dim = h5f["metadata/time"].shape[0]
-            if self.shuffle:
-                shuffled_indices = np.random.permutation(time_dim)
-            else:
-                shuffled_indices = np.arange(time_dim)
-
+            shuffled_indices = (
+                np.random.permutation(time_dim) if self.shuffle else np.arange(time_dim)
+            )
             train_size = int(time_dim * self.split[0])
             train_indices = np.sort(shuffled_indices[:train_size])
 
+        # Compute input stats
         self.input_mean = {}
         self.input_std = {}
-
         met_vars = ["PS", "U", "V", "T", "Q"]
-
         if self.include_troplev:
             met_vars.append("TROPLEV")
 
@@ -143,102 +211,92 @@ class MPIDataset(Dataset):
             if self.input_std[var_name] == 0:
                 self.input_std[var_name] = 1.0
 
+        # Compute output stats
         self.output_mean = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
         self.output_std = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
 
-        for size_idx in range(len(self.settling_velocities)):
-            # Update paths to match process.py structure
+        # Compute MMR log-scale stats
+        n_particles = len(self.settling_velocities)
+        self.mmr_min = float("inf")
+        self.mmr_max = float("-inf")
+        self.mmr_epsilon = 1e-20
+
+        for size_idx in range(n_particles):
+            # MMR stats
             mmr_data = h5f[f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"][
                 train_indices
             ]
-
             self.output_mean["mmr"][size_idx] = float(np.mean(mmr_data))
             self.output_std["mmr"][size_idx] = float(np.std(mmr_data))
             if self.output_std["mmr"][size_idx] == 0:
                 self.output_std["mmr"][size_idx] = 1.0
 
-            # TODO: Scaling. If mass conservation is enforced, we need to unify the mmr and deposition
-            if not self.only_mmr:
-                dry_dep_data = h5f[
-                    f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
-                ][train_indices]
-                wet_dep_data = h5f[
-                    f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
-                ][train_indices]
-
-                self.output_mean["dry_dep"][size_idx] = float(np.mean(dry_dep_data))
-                self.output_std["dry_dep"][size_idx] = float(np.std(dry_dep_data))
-                if self.output_std["dry_dep"][size_idx] == 0:
-                    self.output_std["dry_dep"][size_idx] = 1.0
-
-                self.output_mean["wet_dep"][size_idx] = float(np.mean(wet_dep_data))
-                self.output_std["wet_dep"][size_idx] = float(np.std(wet_dep_data))
-                if self.output_std["wet_dep"][size_idx] == 0:
-                    self.output_std["wet_dep"][size_idx] = 1.0
-
-    def _compute_mmr_stats(self, h5f):
-        """Compute MMR statistics from training data"""
-        train_indices = self.indices if self.mode == "train" else None
-        if train_indices is None:
-            time_dim = h5f["metadata/time"].shape[0]
-            if self.shuffle:
-                shuffled_indices = np.random.permutation(time_dim)
-            else:
-                shuffled_indices = np.arange(time_dim)
-            train_size = int(time_dim * self.split[0])
-            train_indices = np.sort(shuffled_indices[:train_size])
-
-        n_particles = len(self.settling_velocities)
-        self.mmr_min = float("inf")
-        self.mmr_max = float("-inf")
-
-        # First pass: compute log statistics
-        for size_idx in range(n_particles):
-            mmr_data = h5f[f"outputs/mass_mixing_ratio/Plast0{size_idx+1}_MMR_avrg"][
-                train_indices
-            ]
-            # Add small constant to avoid log(0)
-            mmr_data = mmr_data + 1e-20
+            # Log-scale MMR stats
+            mmr_data = mmr_data + self.mmr_epsilon
             log_mmr_data = np.log10(mmr_data)
             self.mmr_min = min(self.mmr_min, float(np.min(log_mmr_data)))
             self.mmr_max = max(self.mmr_max, float(np.max(log_mmr_data)))
+
+            if not self.only_mmr:
+                # Deposition stats
+                for dep_type, path in [
+                    ("dry_dep", "deposition/Plast0{}_DRY_DEP_FLX_avrg"),
+                    ("wet_dep", "deposition/Plast0{}_WETDEP_FLUX_avrg"),
+                ]:
+                    dep_data = h5f[f"outputs/{path.format(size_idx+1)}"][train_indices]
+                    self.output_mean[dep_type][size_idx] = float(np.mean(dep_data))
+                    self.output_std[dep_type][size_idx] = float(np.std(dep_data))
+                    if self.output_std[dep_type][size_idx] == 0:
+                        self.output_std[dep_type][size_idx] = 1.0
 
         # Add small epsilon to avoid division by zero
         if self.mmr_max == self.mmr_min:
             self.mmr_max += 1e-10
 
-    def _save_mmr_stats(self, h5f):
-        """Save MMR statistics to HDF5 metadata"""
-        # Close the current file handle
+        # Save normalization stats
         h5f.close()
-
-        # Reopen in append mode
         with h5py.File(self.h5_file, "a") as h5f:
-            # Create metadata group if it doesn't exist
-            if "normalization" not in h5f:
-                h5f.create_group("normalization")
+            if "normalization" in h5f:
+                del h5f["normalization"]
+            norm_group = h5f.create_group("normalization")
 
-            # Save MMR normalization parameters
-            h5f["normalization/mmr_min"] = self.mmr_min
-            h5f["normalization/mmr_max"] = self.mmr_max
-            h5f["normalization/mmr_epsilon"] = 1e-20  # Save the epsilon value used
+            # Save input stats
+            for var_name in met_vars:
+                norm_group.create_dataset(
+                    f"{var_name}_mean", data=self.input_mean[var_name]
+                )
+                norm_group.create_dataset(
+                    f"{var_name}_std", data=self.input_std[var_name]
+                )
 
-    def _load_mmr_stats(self, h5f):
-        """Load MMR statistics from HDF5 metadata"""
-        if "normalization" in h5f and "mmr_min" in h5f["normalization"]:
-            self.mmr_min = float(h5f["normalization/mmr_min"][()])
-            self.mmr_max = float(h5f["normalization/mmr_max"][()])
-            self.mmr_epsilon = float(h5f["normalization/mmr_epsilon"][()])
-            return True
-        return False
+            # Save output stats
+            for size_idx in range(n_particles):
+                # MMR stats
+                norm_group.create_dataset(
+                    f"mmr_{size_idx}_mean", data=self.output_mean["mmr"][size_idx]
+                )
+                norm_group.create_dataset(
+                    f"mmr_{size_idx}_std", data=self.output_std["mmr"][size_idx]
+                )
 
-    def denormalize_mmr(self, mmr_normalized):
-        """Convert normalized MMR back to original scale"""
-        # Reverse min-max normalization
-        mmr_log = mmr_normalized * (self.mmr_max - self.mmr_min) + self.mmr_min
-        # Reverse log transform
-        mmr = 10**mmr_log - self.mmr_epsilon
-        return mmr
+                if not self.only_mmr:
+                    # Deposition stats
+                    for dep_type in ["dry_dep", "wet_dep"]:
+                        norm_group.create_dataset(
+                            f"{dep_type}_{size_idx}_mean",
+                            data=self.output_mean[dep_type][size_idx],
+                        )
+                        norm_group.create_dataset(
+                            f"{dep_type}_{size_idx}_std",
+                            data=self.output_std[dep_type][size_idx],
+                        )
+
+            # Save MMR log-scale stats
+            norm_group.create_dataset("mmr_min", data=self.mmr_min)
+            norm_group.create_dataset("mmr_max", data=self.mmr_max)
+            norm_group.create_dataset("mmr_epsilon", data=self.mmr_epsilon)
+
+        return True
 
     def __len__(self):
         return self.num_samples
@@ -274,10 +332,6 @@ class MPIDataset(Dataset):
                 q = (q - self.input_mean["Q"]) / self.input_std["Q"]
                 # print("Normalized input fields")
 
-            # Create sparse coordinates once during initialization instead of for each item
-            if not hasattr(self, "lat_grid_3d") and self.include_coordinates:
-                self._create_coordinate_grids()
-
             # Repeat the 2D fields to match the 3D field shape
             shape = u.shape
             ps_3d = np.reshape(ps, (1,) + ps.shape).repeat(shape[0], axis=0)
@@ -291,10 +345,6 @@ class MPIDataset(Dataset):
             if self.include_troplev:
                 inputs = np.concatenate([inputs, troplev_3d], axis=0)
 
-            if self.include_coordinates:
-                inputs = np.concatenate(
-                    [inputs, self.lat_grid_3d, self.lon_grid_3d], axis=0
-                )
             # print("Prepared input tensor")
 
             n_particles = len(self.settling_velocities)
@@ -373,35 +423,6 @@ class MPIDataset(Dataset):
                 wet_dep = torch.from_numpy(wet_dep)
                 return inputs, (mmr, dry_dep, wet_dep)
 
-    def _create_coordinate_grids(self):
-        """Pre-compute coordinate grids once to save memory and computation"""
-        # [-1, 1] normalized coordinates
-        lat_normalized = (
-            2 * (self.lats - self.lats.min()) / (self.lats.max() - self.lats.min()) - 1
-        )
-        lon_normalized = (
-            2 * (self.lons - self.lons.min()) / (self.lons.max() - self.lons.min()) - 1
-        )
-
-        # Create coordinate meshgrid
-        lat_grid, lon_grid = np.meshgrid(lat_normalized, lon_normalized, indexing="ij")
-
-        # Create 3D coordinate grids
-        with h5py.File(self.h5_file, "r") as h5f:
-            # Sample one 3D field to get dimensions
-            sample_3d = h5f["inputs/U"][0]
-            n_levels = sample_3d.shape[0]
-
-        # Store as class attributes in the right shape for stacking
-        self.lat_grid_3d = np.broadcast_to(
-            lat_grid[np.newaxis, :, :],
-            (1, n_levels, lat_grid.shape[0], lat_grid.shape[1]),
-        ).astype(DTYPE)
-        self.lon_grid_3d = np.broadcast_to(
-            lon_grid[np.newaxis, :, :],
-            (1, n_levels, lon_grid.shape[0], lon_grid.shape[1]),
-        ).astype(DTYPE)
-
 
 class MPIDataModule(pl.LightningDataModule):
 
@@ -445,6 +466,7 @@ class MPIDataModule(pl.LightningDataModule):
                 normalize=self.normalize,
                 include_coordinates=self.include_coordinates,
                 shuffle=True,
+                force_normalize=False,
             )
 
             self.val_dataset = MPIDataset(
@@ -454,6 +476,7 @@ class MPIDataModule(pl.LightningDataModule):
                 normalize=self.normalize,
                 include_coordinates=self.include_coordinates,
                 shuffle=True,
+                force_normalize=False,
             )
 
         if stage == "test" or stage is None:
@@ -464,6 +487,7 @@ class MPIDataModule(pl.LightningDataModule):
                 normalize=self.normalize,
                 include_coordinates=self.include_coordinates,
                 shuffle=True,
+                force_normalize=False,
             )
 
     def train_dataloader(self):
@@ -500,6 +524,94 @@ class MPIDataModule(pl.LightningDataModule):
 
         with h5py.File(self.h5_file, "r") as h5f:
             return h5f["metadata/settling_velocity"][:]
+
+
+def get_normalization_stats(h5_file: str) -> Dict:
+    """Get normalization statistics from the HDF5 file.
+
+    Args:
+        h5_file: Path to the HDF5 file
+
+    Returns:
+        Dict containing all normalization statistics:
+        {
+            'input_mean': {'PS': float, 'U': float, ...},
+            'input_std': {'PS': float, 'U': float, ...},
+            'output_mean': {
+                'mmr': {0: float, 1: float, ...},
+                'dry_dep': {0: float, 1: float, ...},
+                'wet_dep': {0: float, 1: float, ...}
+            },
+            'output_std': {
+                'mmr': {0: float, 1: float, ...},
+                'dry_dep': {0: float, 1: float, ...},
+                'wet_dep': {0: float, 1: float, ...}
+            },
+            'mmr_log_scale': {
+                'min': float,
+                'max': float,
+                'epsilon': float
+            }
+        }
+
+    Raises:
+        ValueError: If normalization statistics are not found in the file
+    """
+    with h5py.File(h5_file, "r") as h5f:
+        if "normalization" not in h5f:
+            raise ValueError("Normalization statistics not found in HDF5 file")
+
+        norm_group = h5f["normalization"]
+        stats = {
+            "input_mean": {},
+            "input_std": {},
+            "output_mean": {"mmr": {}, "dry_dep": {}, "wet_dep": {}},
+            "output_std": {"mmr": {}, "dry_dep": {}, "wet_dep": {}},
+            "mmr_log_scale": {},
+        }
+
+        # Get input stats
+        met_vars = ["PS", "U", "V", "T", "Q"]
+        if "TROPLEV_mean" in norm_group:
+            met_vars.append("TROPLEV")
+
+        for var in met_vars:
+            stats["input_mean"][var] = float(norm_group[f"{var}_mean"][()])
+            stats["input_std"][var] = float(norm_group[f"{var}_std"][()])
+
+        # Get number of particles from MMR stats
+        n_particles = 0
+        while f"mmr_{n_particles}_mean" in norm_group:
+            n_particles += 1
+
+        # Get output stats
+        for size_idx in range(n_particles):
+            # MMR stats
+            stats["output_mean"]["mmr"][size_idx] = float(
+                norm_group[f"mmr_{size_idx}_mean"][()]
+            )
+            stats["output_std"]["mmr"][size_idx] = float(
+                norm_group[f"mmr_{size_idx}_std"][()]
+            )
+
+            # Deposition stats if they exist
+            for dep_type in ["dry_dep", "wet_dep"]:
+                if f"{dep_type}_{size_idx}_mean" in norm_group:
+                    stats["output_mean"][dep_type][size_idx] = float(
+                        norm_group[f"{dep_type}_{size_idx}_mean"][()]
+                    )
+                    stats["output_std"][dep_type][size_idx] = float(
+                        norm_group[f"{dep_type}_{size_idx}_std"][()]
+                    )
+
+        # Get MMR log-scale stats
+        stats["mmr_log_scale"] = {
+            "min": float(norm_group["mmr_min"][()]),
+            "max": float(norm_group["mmr_max"][()]),
+            "epsilon": float(norm_group["mmr_epsilon"][()]),
+        }
+
+        return stats
 
 
 if __name__ == "__main__":
