@@ -114,7 +114,26 @@ class Base(pl.LightningModule, ABC):
         if self.hparams.use_physics_loss:
             return self.compute_physics_loss(x, mmr_pred, mmr_true, dt)
         else:
-            return {"total": F.mse_loss(mmr_pred, mmr_true)}
+            # Shape [1, 6, 48, 384, 576]
+            # Create altitude weights (exponentially decreasing with height)
+            altitude_dim = mmr_pred.shape[2]
+            altitude_weights = torch.exp(
+                -torch.arange(altitude_dim, device=mmr_pred.device) * 0.5
+            )
+            # Normalize weights to range from 2 to 1
+            altitude_weights = 1 + (altitude_weights - altitude_weights.min()) / (
+                altitude_weights.max() - altitude_weights.min()
+            )
+            altitude_weights = altitude_weights.view(1, 1, -1, 1, 1)
+
+            # Apply weights to squared differences
+            squared_diff = (mmr_pred - mmr_true) ** 2
+            weighted_squared_diff = squared_diff * altitude_weights
+
+            # Take mean over all dimensions
+            loss = weighted_squared_diff.mean()
+
+            return {"total": loss}
 
     def compute_physics_loss(self, x, mmr_pred, mmr_true, dt=1.0):
         """
@@ -278,7 +297,7 @@ if __name__ == "__main__":
 
     # Create model instances - one with physics loss and one without
     model_no_physics = LinearModel(
-        in_channels=7,
+        in_channels=5,
         out_channels=6,
         mmr_weight=1.0,
         conservation_weight=0.1,
@@ -287,7 +306,7 @@ if __name__ == "__main__":
     )
 
     model_with_physics = LinearModel(
-        in_channels=7,
+        in_channels=5,
         out_channels=6,
         mmr_weight=1.0,
         conservation_weight=0.1,

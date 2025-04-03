@@ -24,9 +24,9 @@ class ConvBlock(nn.Module):
 class CNNPINN(Base):
     def __init__(
         self,
-        in_channels=7,
+        in_channels=5,
         out_channels=6,
-        hidden_channels=[16, 32, 16],  # Lightweight channel configuration
+        hidden_channels=[8, 16, 8],  # Lightweight channel configuration
         kernel_size=3,
         learning_rate=1e-3,
         weight_decay=1e-5,
@@ -92,8 +92,9 @@ class CNNPINN(Base):
 
         Returns:
             tensor: MMR predictions [batch_size, n_particles, altitude, latitude, longitude]
+                   with values constrained to [0,1] via sigmoid activation
         """
-        return self.network(x)
+        return torch.sigmoid(self.network(x))
 
 
 if __name__ == "__main__":

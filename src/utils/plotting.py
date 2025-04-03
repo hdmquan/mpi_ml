@@ -3,7 +3,7 @@ from plotly.subplots import make_subplots
 from src.utils import PATH
 
 
-def plot_layer(x, lev, num_channels=6, titles=None, save=False):
+def plot_layer(x, lev, num_channels=6, titles=None, save=False, x_range=[None, None]):
     """
     Shape: [batch_size, channels, altitude, latitude, longitude]
     """
@@ -27,8 +27,8 @@ def plot_layer(x, lev, num_channels=6, titles=None, save=False):
                 z=x[0, i, lev, :, :],
                 colorscale="RdBu",
                 reversescale=True,
-                # zmin=-1,
-                # zmax=1,
+                zmin=x_range[0],
+                zmax=x_range[1],
             ),
             row=row,
             col=col,
@@ -44,7 +44,7 @@ def plot_layer(x, lev, num_channels=6, titles=None, save=False):
     fig.show()
 
 
-def plot_long_cut(x, long, num_channels=6, titles=None, save=False):
+def plot_long_cut(x, long, num_channels=6, titles=None, save=False, x_range=[None, None]):
     """
     Shape: [batch_size, channels, altitude, latitude, longitude]
     """
@@ -64,8 +64,8 @@ def plot_long_cut(x, long, num_channels=6, titles=None, save=False):
                 z=x[0, i, :, :, long],
                 colorscale="RdBu",
                 reversescale=True,
-                # zmin=-1,
-                # zmax=1,
+                zmin=x_range[0],
+                zmax=x_range[1],
             ),
             row=row,
             col=col,

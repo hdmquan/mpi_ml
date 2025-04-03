@@ -3,6 +3,7 @@ import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from src.models.fno import FNOPINN
+from src.models.cnn import CNNPINN
 from src.data.module import MPIDataModule
 from src.utils.plotting import plot_layer, plot_long_cut
 from src.utils import set_seed, PATH
@@ -13,7 +14,8 @@ set_seed()
 datamodule = MPIDataModule(batch_size=3, num_workers=4)
 
 # %% Model setup
-model = FNOPINN(use_physics_loss=False)
+# model = FNOPINN(use_physics_loss=False)
+model =CNNPINN(use_physics_loss=False)
 
 # %% Training configuration
 checkpoint_dir = PATH.CHECKPOINTS
