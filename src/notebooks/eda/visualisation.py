@@ -41,12 +41,12 @@ titles = [
     "Wind (East)",
     "Temperature",
     "Humidity",
-    "Tropospheric pressure",
+    # "Tropospheric pressure",
 ]
 lev = 1
-plot_layer(X, lev - 1, titles=titles)
+plot_layer(X, lev - 1, num_channels=5, titles=titles)
 
 # %%
-plot_long_cut(X, x // 2, titles=titles)
+plot_long_cut(X, x // 2, num_channels=5, titles=titles)
 
 # %%

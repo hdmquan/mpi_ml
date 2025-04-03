@@ -387,6 +387,10 @@ class MPIDataset(Dataset):
 
         mmr = torch.stack(mmr_list)
 
+        if self.reverse_lev:
+            mmr = mmr.flip(1)
+            inputs = inputs.flip(1)
+
         if self.only_mmr:
             return inputs, mmr
         else:

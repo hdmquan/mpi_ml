@@ -5,25 +5,35 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from src.models.fno import FNOPINN
 from src.data.module import MPIDataModule
 from src.utils.plotting import plot_layer, plot_long_cut
+from src.utils import set_seed, PATH
+
+set_seed()
 
 # %% Data
-datamodule = MPIDataModule(include_coordinates=False, batch_size=3, num_workers=4)
+datamodule = MPIDataModule(batch_size=3, num_workers=4)
 
 # %% Model setup
 model = FNOPINN(use_physics_loss=False)
 
 # %% Training configuration
+checkpoint_dir = PATH.CHECKPOINTS
+checkpoint_path = checkpoint_dir / "best-model.ckpt"
+
+# Create checkpoint callback
+checkpoint_callback = ModelCheckpoint(
+    dirpath=checkpoint_dir,
+    filename="best-model",
+    monitor="val_total",
+    mode="min",
+    save_top_k=1,
+)
+
+# Training configuration
 trainer = pl.Trainer(
     max_epochs=100,
     accelerator="cuda" if torch.cuda.is_available() else "cpu",
     callbacks=[
-        ModelCheckpoint(
-            dirpath="checkpoints",
-            filename="best-model",
-            monitor="val_total",
-            mode="min",
-            save_top_k=1,
-        ),
+        checkpoint_callback,
         pl.callbacks.early_stopping.EarlyStopping(
             monitor="val_total", patience=5, mode="min"
         ),
@@ -31,8 +41,13 @@ trainer = pl.Trainer(
     enable_progress_bar=True,
 )
 
-# %% Training
-trainer.fit(model, datamodule=datamodule)
+# Load from checkpoint if it exists
+if checkpoint_path.exists():
+    print(f"Resuming training from checkpoint: {checkpoint_path}")
+    trainer.fit(model, datamodule=datamodule, ckpt_path=checkpoint_path)
+else:
+    print("Starting training from scratch")
+    trainer.fit(model, datamodule=datamodule)
 
 # %% Testing
 test_results = trainer.test(model, datamodule=datamodule)
