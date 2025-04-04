@@ -1,6 +1,6 @@
 # %% [markdown]
 # # Mass Conservation Analysis
-# This notebook analyzes the temporal evolution of wet deposition, dry deposition, and mass mixing ratio (MMR) for different particle sizes.
+# This notebook analyzes temporal evolution of wet/dry deposition, surface emissions, and mass mixing ratio (MMR) for different particle sizes.
 
 # %% Imports
 import h5py
@@ -9,54 +9,46 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy.optimize import curve_fit
+import datetime
 from src.utils import PATH
 
 # %% Load and process data
 input_file = PATH.PROCESSED_DATA / "mpidata.h5"
 
+# Load data from HDF5 file
 results = []
-
 with h5py.File(input_file, "r") as hf:
-    # Get timestamps
     timestamps = [ts.decode() for ts in hf["metadata/time"][:]]
 
-    # Process each particle size (1-6)
-    for i in range(1, 7):
-        particle_results = []
-
+    for i in range(1, 7):  # Process each particle size (1-6)
         for month_idx in range(len(timestamps)):
-            # Get wet deposition
             wet_dep = hf[f"outputs/deposition/Plast0{i}_WETDEP_FLUX_avrg"][month_idx]
-            # Get dry deposition
             dry_dep = hf[f"outputs/deposition/Plast0{i}_DRY_DEP_FLX_avrg"][month_idx]
-            # Get MMR (sum across all levels)
             mmr = hf[f"outputs/mass_mixing_ratio/Plast0{i}_MMR_avrg"][month_idx]
+            surf_emis = hf[f"outputs/emissions/Plast0{i}_SRF_EMIS_avrg"][month_idx]
 
-            # Calculate sums
-            wet_sum = np.sum(wet_dep)
-            dry_sum = np.sum(dry_dep)
-            mmr_sum = np.sum(mmr)
-
-            particle_results.append(
+            results.append(
                 {
                     "timestamp": timestamps[month_idx],
                     "particle_size": f"Size {i}",
-                    "wet_deposition": wet_sum,
-                    "dry_deposition": dry_sum,
-                    "mmr": mmr_sum,
-                    "total": wet_sum + dry_sum + mmr_sum,
+                    "wet_deposition": np.sum(wet_dep),
+                    "dry_deposition": np.sum(dry_dep),
+                    "mmr": np.sum(mmr),
+                    "surface_emission": np.sum(surf_emis),
                 }
             )
 
-        results.extend(particle_results)
-
-# Convert to DataFrame
 df = pd.DataFrame(results)
+df["total"] = (
+    df["wet_deposition"] + df["dry_deposition"] + df["mmr"] + df["surface_emission"]
+)
 
 # %% [markdown]
 # ## Time Series Visualization of Components by Particle Size
 
 # %% Create interactive time series plot
+# Create multi-panel time series plot of all components
 fig = make_subplots(
     rows=2,
     cols=2,
@@ -64,7 +56,7 @@ fig = make_subplots(
         "Wet Deposition",
         "Dry Deposition",
         "Mass Mixing Ratio",
-        "Total (Wet + Dry + MMR)",
+        "Surface Emission",
     ),
     vertical_spacing=0.12,
     horizontal_spacing=0.1,
@@ -74,7 +66,7 @@ components = {
     "wet_deposition": (1, 1),
     "dry_deposition": (1, 2),
     "mmr": (2, 1),
-    "total": (2, 2),
+    "surface_emission": (2, 2),
 }
 
 for component, (row, col) in components.items():
@@ -92,46 +84,318 @@ for component, (row, col) in components.items():
         )
 
 fig.update_layout(
-    height=800,
+    height=1000,
     width=1200,
     title_text="Temporal Evolution of Deposition Components by Particle Size",
     showlegend=True,
 )
-
 fig.update_xaxes(title_text="Time")
 fig.update_yaxes(title_text="Value")
 
 fig.show()
 
-# %% [markdown]
-# ## Stacked Area Chart of Total Components
+# So it seems Surface Emission is constant like they stated in the paper
 
-# %% Create stacked area chart
-df_pivot = df.pivot_table(
-    index="timestamp", columns="particle_size", values="total", aggfunc="sum"
-).reset_index()
+# Source unit is kg/m2
+# MMR unit is kg/kg/cell_volume
+# Deposition unit is kg/cell_area
+# To able to make mass conservation check we need to convert everything to kg
+# Formula is MMR_sum * accounted_atmosphere_weight = source_sum * earth_surface_area + wet_deposition_sum + dry_deposition_sum
+# Hence accounted_atmosphere_weight = (source_sum * earth_surface_area + wet_deposition_sum + dry_deposition_sum) / MMR_sum
 
-fig_area = go.Figure()
+# %% Constants and Calculations
+EARTH_RADIUS = 6.371e6  # Earth's radius in meters
+EARTH_SURFACE_AREA = 4 * np.pi * EARTH_RADIUS**2  # Earth's surface area in m²
+
+# Calculate accounted atmosphere weight for each particle and timestamp
+df["source_mass"] = df["surface_emission"] * EARTH_SURFACE_AREA
+weights = []
 
 for size in df["particle_size"].unique():
-    fig_area.add_trace(
+    size_data = df[df["particle_size"] == size]
+    for _, row in size_data.iterrows():
+        total_mass = row["source_mass"] + row["wet_deposition"] + row["dry_deposition"]
+        acc_weight = total_mass / row["mmr"] if row["mmr"] != 0 else np.nan
+        weights.append(
+            {
+                "particle_size": size,
+                "timestamp": row["timestamp"],
+                "accounted_weight": acc_weight,
+            }
+        )
+
+acc_weight_df = pd.DataFrame(weights)
+
+# %% Visualize accounted atmosphere weight over time
+fig = px.line(
+    acc_weight_df,
+    x="timestamp",
+    y="accounted_weight",
+    color="particle_size",
+    title="Accounted Atmosphere Weight Over Time",
+)
+fig.update_layout(
+    xaxis_title="Time",
+    yaxis_title="Accounted Atmosphere Weight (kg)",
+    height=600,
+    width=1000,
+)
+fig.show()
+
+# %% Calculate and visualize mass conservation ratio
+# Calculate mass conservation ratio for each particle and timestamp
+conservation_results = []
+
+for size in df["particle_size"].unique():
+    size_data = df[df["particle_size"] == size]
+    size_weight_df = acc_weight_df[acc_weight_df["particle_size"] == size]
+
+    for _, row in size_data.iterrows():
+        acc_weight = size_weight_df[size_weight_df["timestamp"] == row["timestamp"]][
+            "accounted_weight"
+        ].values[0]
+
+        theoretical_mass = (
+            row["mmr"] * acc_weight if not np.isnan(acc_weight) else np.nan
+        )
+        actual_mass = row["source_mass"] + row["wet_deposition"] + row["dry_deposition"]
+        conservation_ratio = (
+            theoretical_mass / actual_mass if actual_mass != 0 else np.nan
+        )
+
+        conservation_results.append(
+            {
+                "particle_size": size,
+                "timestamp": row["timestamp"],
+                "conservation_ratio": conservation_ratio,
+            }
+        )
+
+conservation_df = pd.DataFrame(conservation_results)
+
+# Plot mass conservation ratio over time
+fig = px.line(
+    conservation_df,
+    x="timestamp",
+    y="conservation_ratio",
+    color="particle_size",
+    title="Mass Conservation Ratio Over Time",
+)
+fig.update_layout(
+    xaxis_title="Time",
+    yaxis_title="Mass Conservation Ratio",
+    height=600,
+    width=1000,
+    yaxis=dict(range=[0, 2]),
+)
+fig.add_hline(
+    y=1.0,
+    line_dash="dash",
+    line_color="red",
+    annotation_text="Perfect Conservation",
+)
+fig.show()
+
+# The graph seems to be 1 cycle of cosine over a year
+# Check concentration ratio between the 2 hemispheres...
+
+
+# %% Fit cosine model to accounted atmosphere weight
+# Define cosine model function
+def cosine_model(t, amplitude, phase, vertical_shift, period=365.25):
+    """Cosine function with amplitude, phase shift, vertical shift and period in days"""
+    return amplitude * np.cos(2 * np.pi * t / period + phase) + vertical_shift
+
+
+# Convert timestamp string to days since first timestamp
+def timestamp_to_days(timestamp_str, first_timestamp_str):
+    """Convert timestamp string to days since first timestamp"""
+    timestamp = datetime.datetime.strptime(timestamp_str, "%Y-%m")
+    first_timestamp = datetime.datetime.strptime(first_timestamp_str, "%Y-%m")
+    return (timestamp - first_timestamp).days
+
+
+# Fit cosine model to accounted atmosphere weight for each particle size
+cosine_params = {}
+
+for size in acc_weight_df["particle_size"].unique():
+    size_data = acc_weight_df[acc_weight_df["particle_size"] == size]
+
+    timestamps_list = size_data["timestamp"].tolist()
+    first_timestamp = timestamps_list[0]
+    days = [timestamp_to_days(ts, first_timestamp) for ts in timestamps_list]
+    weights = size_data["accounted_weight"].values
+
+    if np.isnan(weights).any():
+        print(f"Skipping {size} due to NaN values")
+        continue
+
+    # Initial parameter guesses
+    p0 = [
+        (np.max(weights) - np.min(weights)) / 2,  # amplitude
+        0,  # phase
+        np.mean(weights),  # vertical shift
+    ]
+
+    try:
+        params, _ = curve_fit(cosine_model, days, weights, p0=p0)
+        cosine_params[size] = {
+            "amplitude": params[0],
+            "phase": params[1],
+            "vertical_shift": params[2],
+        }
+
+        # Plot fitted cosine curve against data points
+        days_fine = np.linspace(min(days), max(days), 1000)
+        fitted_weights = cosine_model(days_fine, *params)
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(x=days, y=weights, mode="markers", name=f"{size} Data")
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=days_fine,
+                y=fitted_weights,
+                mode="lines",
+                name="Fitted Cosine",
+                line=dict(color="red"),
+            )
+        )
+        fig.update_layout(
+            title=f"Cosine Fit for {size}",
+            xaxis_title=f"Days since {first_timestamp}",
+            yaxis_title="Accounted Atmosphere Weight (kg)",
+            height=600,
+            width=1000,
+            showlegend=True,
+        )
+        fig.show()
+
+        # Print cosine model parameters and fit quality
+        print(f"Cosine parameters for {size}:")
+        print(f"  Amplitude: {params[0]:.2e}")
+        print(f"  Phase: {params[1]:.4f}")
+        print(f"  Vertical shift: {params[2]:.2e}")
+        print(
+            f"  R² value: {np.corrcoef(weights, cosine_model(np.array(days), *params))[0, 1]**2:.4f}"
+        )
+
+    except Exception as e:
+        print(f"Could not fit cosine model for {size}: {e}")
+
+# %% Demonstrate MMR correction for a sample particle size
+if not cosine_params:
+    print("No cosine parameters available for correction")
+else:
+    sample_size = list(cosine_params.keys())[0]
+    sample_data = df[df["particle_size"] == sample_size]
+
+    # Apply correction to sample data
+    corrected_mmr = []
+    for _, row in sample_data.iterrows():
+        # Apply seasonal correction to MMR based on fitted cosine models
+        params = cosine_params[sample_size]
+        first_timestamp = "2013-01"
+        days = timestamp_to_days(row["timestamp"], first_timestamp)
+
+        # Calculate correction factor based on cosine model
+        seasonal_factor = (
+            cosine_model(
+                days, params["amplitude"], params["phase"], params["vertical_shift"]
+            )
+            / params["vertical_shift"]
+        )
+
+        # Apply correction
+        corrected = row["mmr"] * seasonal_factor
+        corrected_mmr.append(corrected)
+
+    # Plot comparison of original vs corrected MMR
+    fig = go.Figure()
+    fig.add_trace(
         go.Scatter(
-            x=df_pivot["timestamp"],
-            y=df_pivot[size],
-            name=size,
-            stackgroup="one",
-            mode="lines",
-            line=dict(width=0.5),
+            x=sample_data["timestamp"],
+            y=sample_data["mmr"],
+            name="Original MMR",
+            line=dict(color="blue"),
         )
     )
+    fig.add_trace(
+        go.Scatter(
+            x=sample_data["timestamp"],
+            y=corrected_mmr,
+            name="Corrected MMR",
+            line=dict(color="red"),
+        )
+    )
+    fig.update_layout(
+        title=f"Original vs Seasonally Corrected MMR for {sample_size}",
+        xaxis_title="Time",
+        yaxis_title="Mass Mixing Ratio",
+        height=600,
+        width=1000,
+        showlegend=True,
+    )
+    fig.show()
 
-fig_area.update_layout(
-    title="Stacked Total Components Over Time",
-    xaxis_title="Time",
-    yaxis_title="Total Value",
-    height=500,
-    width=1000,
-    showlegend=True,
-)
+    # Check if correction improves mass conservation
+    print("\nMass Conservation Check:")
+    original_conservation = conservation_df[
+        conservation_df["particle_size"] == sample_size
+    ]["conservation_ratio"].values
 
-fig_area.show()
+    # Calculate new conservation ratio with corrected MMR
+    new_conservation = []
+    size_weight_df = acc_weight_df[acc_weight_df["particle_size"] == sample_size]
+
+    for idx, row in enumerate(sample_data.itertuples()):
+        acc_weight = size_weight_df[size_weight_df["timestamp"] == row.timestamp][
+            "accounted_weight"
+        ].values[0]
+
+        theoretical_mass = corrected_mmr[idx] * acc_weight
+        actual_mass = row.source_mass + row.wet_deposition + row.dry_deposition
+        new_ratio = theoretical_mass / actual_mass if actual_mass != 0 else np.nan
+        new_conservation.append(new_ratio)
+
+    # Plot comparison of original vs corrected conservation ratios
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=sample_data["timestamp"],
+            y=new_conservation,
+            name="Corrected Conservation Ratio",
+            line=dict(color="red"),
+        )
+    )
+    fig.add_hline(
+        y=1.0,
+        line_dash="dash",
+        line_color="black",
+        annotation_text="Perfect Conservation",
+    )
+    fig.update_layout(
+        title=f"Conservation Ratio with Cosine Correction for {sample_size}",
+        xaxis_title="Time",
+        yaxis_title="Conservation Ratio",
+        height=600,
+        width=1000,
+        showlegend=True,
+    )
+    fig.show()
+
+    # Calculate and print improvement metrics
+    original_deviation = np.mean(np.abs(np.array(original_conservation) - 1.0))
+    corrected_deviation = np.mean(np.abs(np.array(new_conservation) - 1.0))
+    improvement = (original_deviation - corrected_deviation) / original_deviation * 100
+
+    print(
+        f"Average deviation from perfect conservation (original): {original_deviation:.4f}"
+    )
+    print(
+        f"Average deviation from perfect conservation (corrected): {corrected_deviation:.4f}"
+    )
+    print(f"Improvement: {improvement:.2f}%")
+
+# %%
