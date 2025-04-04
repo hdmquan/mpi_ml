@@ -37,12 +37,15 @@ def process_netcdf_files():
     # Microplastic mass mixing ratio
     mp_mmr_vars = [f"Plast0{i}_MMR_avrg" for i in range(1, 7)]
 
+    # Surface emission (source) terms
+    mp_src_vars = [f"Plast0{i}_SRF_EMIS_avrg" for i in range(1, 7)]
+
     # Microplastic deposition fluxes
-    mp_dep_vars = (
-        [f"Plast0{i}_SRF_EMIS_avrg" for i in range(1, 7)]  # Surface
-        + [f"Plast0{i}_DRY_DEP_FLX_avrg" for i in range(1, 7)]  # Dry
-        + [f"Plast0{i}_WETDEP_FLUX_avrg" for i in range(1, 7)]  # Wet
-    )
+    mp_dep_vars = [
+        f"Plast0{i}_DRY_DEP_FLX_avrg" for i in range(1, 7)
+    ] + [  # Dry deposition
+        f"Plast0{i}_WETDEP_FLUX_avrg" for i in range(1, 7)
+    ]  # Wet deposition
 
     with h5py.File(output_file, "w") as hf:
 
@@ -131,6 +134,13 @@ def process_netcdf_files():
                 var, shape=(time_dim, lev_dim, lat_dim, lon_dim), dtype="float32"
             )
 
+        # MP surface emissions are 3D
+        mp_src_grp = output_grp.create_group("emissions")
+        for var in mp_src_vars:
+            mp_src_grp.create_dataset(
+                var, shape=(time_dim, lat_dim, lon_dim), dtype="float32"
+            )
+
         # MP deposition fluxes are 3D
         mp_dep_grp = output_grp.create_group("deposition")
         for var in mp_dep_vars:
@@ -169,6 +179,17 @@ def process_netcdf_files():
                         for attr_name in nc.variables[var].ncattrs():
                             if attr_name != "_FillValue":
                                 mp_mmr_grp[var].attrs[attr_name] = getattr(
+                                    nc.variables[var], attr_name
+                                )
+
+                for var in mp_src_vars:
+                    mp_src_grp[var][i] = nc.variables[var][0]
+
+                    # Copy attributes on first iteration
+                    if i == 0:
+                        for attr_name in nc.variables[var].ncattrs():
+                            if attr_name != "_FillValue":
+                                mp_src_grp[var].attrs[attr_name] = getattr(
                                     nc.variables[var], attr_name
                                 )
 
