@@ -28,6 +28,7 @@ class MPIDataset(Dataset):
         include_troplev: bool = False,
         only_mmr: bool = True,
         force_normalize: bool = False,
+        include_emissions: bool = True,
     ):
         """
         Args:
@@ -38,6 +39,7 @@ class MPIDataset(Dataset):
             include_coordinates: Whether to include lat/lon coordinates as additional channels
             shuffle: Whether to shuffle the data indices (default: False)
             reverse_lev: Latitude originally descending (default: True)
+            include_emissions: Whether to include surface emissions as inputs (default: True)
         """
         super().__init__()
 
@@ -51,6 +53,7 @@ class MPIDataset(Dataset):
         self.include_troplev = include_troplev
         self.only_mmr = only_mmr
         self.force_normalize = force_normalize
+        self.include_emissions = include_emissions
         self._prepare_indices()
 
         # Metadata
@@ -137,6 +140,27 @@ class MPIDataset(Dataset):
                 else:
                     return False  # Missing some stats, need to recompute
 
+            # Load emission stats if needed
+            if self.include_emissions:
+                self.emission_mean = {}
+                self.emission_std = {}
+                n_particles = len(self.settling_velocities)
+
+                for size_idx in range(n_particles):
+                    stat_key = f"emission_{size_idx}"
+                    if (
+                        f"{stat_key}_mean" in norm_group
+                        and f"{stat_key}_std" in norm_group
+                    ):
+                        self.emission_mean[size_idx] = float(
+                            norm_group[f"{stat_key}_mean"][()]
+                        )
+                        self.emission_std[size_idx] = float(
+                            norm_group[f"{stat_key}_std"][()]
+                        )
+                    else:
+                        return False  # Missing emission stats, need to recompute
+
             # Load output stats
             self.output_mean = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
             self.output_std = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
@@ -213,6 +237,21 @@ class MPIDataset(Dataset):
             if self.input_std[var_name] == 0:
                 self.input_std[var_name] = 1.0
 
+        # Compute emission stats if needed
+        if self.include_emissions:
+            self.emission_mean = {}
+            self.emission_std = {}
+            n_particles = len(self.settling_velocities)
+
+            for size_idx in range(n_particles):
+                emission_data = h5f[
+                    f"outputs/emissions/Plast0{size_idx+1}_SRF_EMIS_avrg"
+                ][train_indices]
+                self.emission_mean[size_idx] = float(np.mean(emission_data))
+                self.emission_std[size_idx] = float(np.std(emission_data))
+                if self.emission_std[size_idx] == 0:
+                    self.emission_std[size_idx] = 1.0
+
         # Compute output stats
         self.output_mean = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
         self.output_std = {"mmr": {}, "dry_dep": {}, "wet_dep": {}}
@@ -270,6 +309,16 @@ class MPIDataset(Dataset):
                 norm_group.create_dataset(
                     f"{var_name}_std", data=self.input_std[var_name]
                 )
+
+            # Save emission stats if needed
+            if self.include_emissions:
+                for size_idx in range(n_particles):
+                    norm_group.create_dataset(
+                        f"emission_{size_idx}_mean", data=self.emission_mean[size_idx]
+                    )
+                    norm_group.create_dataset(
+                        f"emission_{size_idx}_std", data=self.emission_std[size_idx]
+                    )
 
             # Save output stats
             for size_idx in range(n_particles):
@@ -356,12 +405,42 @@ class MPIDataset(Dataset):
         shape = u.shape
         ps_3d = ps.unsqueeze(0).repeat(shape[0], 1, 1)
 
+        # Process emissions data if needed
+        emission_tensors = []
+        if self.include_emissions:
+            n_particles = len(self.settling_velocities)
+            for size_idx in range(n_particles):
+                # Get emission data
+                emission_raw = h5f[
+                    f"outputs/emissions/Plast0{size_idx+1}_SRF_EMIS_avrg"
+                ][time_idx]
+                emission_tensor = torch.from_numpy(emission_raw).to(torch.float32)
+
+                # Normalize if needed
+                if self.normalize:
+                    emission_tensor = (
+                        emission_tensor - self.emission_mean[size_idx]
+                    ) / self.emission_std[size_idx]
+
+                # Expand to 3D to match other inputs
+                emission_3d = emission_tensor.unsqueeze(0).repeat(shape[0], 1, 1)
+                emission_tensors.append(emission_3d)
+
+            emissions = torch.stack(emission_tensors)
+
         # Stack inputs
+        input_tensors = [ps_3d, u, v, t, q]
         if self.include_troplev:
             troplev_3d = troplev.unsqueeze(0).repeat(shape[0], 1, 1)
-            inputs = torch.stack([ps_3d, u, v, t, q, troplev_3d], dim=0)
-        else:
-            inputs = torch.stack([ps_3d, u, v, t, q], dim=0)
+            input_tensors.append(troplev_3d)
+
+        # Stack all inputs
+        inputs = torch.stack(input_tensors, dim=0)
+
+        # Add emissions to inputs if needed
+        if self.include_emissions:
+            # Concatenate along the first dimension (channels)
+            inputs = torch.cat([inputs, emissions], dim=0)
 
         # Process MMR data
         n_particles = len(self.settling_velocities)
@@ -387,48 +466,67 @@ class MPIDataset(Dataset):
 
         mmr = torch.stack(mmr_list)
 
-        if self.reverse_lev:
-            mmr = mmr.flip(1)
-            inputs = inputs.flip(1)
+        # Process deposition data regardless of only_mmr flag
+        dry_dep_list = []
+        wet_dep_list = []
 
-        if self.only_mmr:
-            return inputs, mmr
-        else:
-            # Process deposition data
-            dry_dep_list = []
-            wet_dep_list = []
+        for size_idx in range(n_particles):
+            # Get raw data as numpy arrays
+            dry_raw = h5f[f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"][
+                time_idx
+            ]
+            wet_raw = h5f[f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"][
+                time_idx
+            ]
 
-            for size_idx in range(n_particles):
-                # Get raw data as numpy arrays
-                dry_raw = h5f[
-                    f"outputs/deposition/Plast0{size_idx+1}_DRY_DEP_FLX_avrg"
-                ][time_idx]
-                wet_raw = h5f[
-                    f"outputs/deposition/Plast0{size_idx+1}_WETDEP_FLUX_avrg"
-                ][time_idx]
-
-                if self.normalize:
-                    # Normalize in numpy domain to ensure consistency
+            if self.normalize:
+                # Normalize in numpy domain to ensure consistency
+                if not self.only_mmr:  # Use existing normalization stats if available
                     dry_data = (
                         dry_raw - self.output_mean["dry_dep"][size_idx]
                     ) / self.output_std["dry_dep"][size_idx]
                     wet_data = (
                         wet_raw - self.output_mean["wet_dep"][size_idx]
                     ) / self.output_std["wet_dep"][size_idx]
-                    # Convert to tensors after normalization
-                    dry_data = torch.from_numpy(dry_data).to(torch.float32)
-                    wet_data = torch.from_numpy(wet_data).to(torch.float32)
-                else:
-                    dry_data = torch.from_numpy(dry_raw).to(torch.float32)
-                    wet_data = torch.from_numpy(wet_raw).to(torch.float32)
+                else:  # Just use min-max normalization if we don't have normalization stats
+                    dry_data = (dry_raw - np.min(dry_raw)) / (
+                        np.max(dry_raw) - np.min(dry_raw) + 1e-10
+                    )
+                    wet_data = (wet_raw - np.min(wet_raw)) / (
+                        np.max(wet_raw) - np.min(wet_raw) + 1e-10
+                    )
 
-                dry_dep_list.append(dry_data)
-                wet_dep_list.append(wet_data)
+                # Convert to tensors after normalization
+                dry_data = torch.from_numpy(dry_data).to(torch.float32)
+                wet_data = torch.from_numpy(wet_data).to(torch.float32)
+            else:
+                dry_data = torch.from_numpy(dry_raw).to(torch.float32)
+                wet_data = torch.from_numpy(wet_raw).to(torch.float32)
 
-            dry_dep = torch.stack(dry_dep_list)
-            wet_dep = torch.stack(wet_dep_list)
+            # Add dimension to match expected shape for concatenation
+            dry_data = dry_data.unsqueeze(0)  # shape: [1, 384, 576]
+            wet_data = wet_data.unsqueeze(0)  # shape: [1, 384, 576]
 
-            return inputs, (mmr, dry_dep, wet_dep)
+            # Store for each particle size
+            dry_dep_list.append(dry_data)
+            wet_dep_list.append(wet_data)
+
+        # Stack all the deposition data
+        dry_dep = torch.stack(dry_dep_list)  # shape: [6, 1, 384, 576]
+        wet_dep = torch.stack(wet_dep_list)  # shape: [6, 1, 384, 576]
+
+        # Combine the deposition data
+        dep = torch.cat([dry_dep, wet_dep], dim=1)  # shape: [6, 2, 384, 576]
+
+        if self.reverse_lev:
+            mmr = mmr.flip(1)
+            inputs = inputs.flip(1)
+
+        # Combine MMR and deposition data to create output with shape [6, 50, 384, 576]
+        combined_output = torch.cat([mmr, dep], dim=1)  # shape: [6, 50, 384, 576]
+
+        # Always return the combined output, ignoring only_mmr flag
+        return inputs, combined_output
 
 
 class MPIDataModule(pl.LightningDataModule):
@@ -441,6 +539,7 @@ class MPIDataModule(pl.LightningDataModule):
         shuffle: bool = True,
         normalize: bool = True,
         include_coordinates: bool = True,
+        include_emissions: bool = True,
         **kwargs,
     ):
         super().__init__()
@@ -451,6 +550,7 @@ class MPIDataModule(pl.LightningDataModule):
         self.normalize = normalize
         self.include_coordinates = include_coordinates
         self.shuffle = shuffle
+        self.include_emissions = include_emissions
 
         self.h5_file = PATH.PROCESSED_DATA / "mpidata.h5"
 
@@ -476,6 +576,7 @@ class MPIDataModule(pl.LightningDataModule):
                 include_coordinates=self.include_coordinates,
                 shuffle=self.shuffle,
                 force_normalize=False,
+                include_emissions=self.include_emissions,
             )
 
             self.val_dataset = MPIDataset(
@@ -486,6 +587,7 @@ class MPIDataModule(pl.LightningDataModule):
                 include_coordinates=self.include_coordinates,
                 shuffle=self.shuffle,
                 force_normalize=False,
+                include_emissions=self.include_emissions,
             )
 
         if stage == "test" or stage is None:
@@ -497,6 +599,7 @@ class MPIDataModule(pl.LightningDataModule):
                 include_coordinates=self.include_coordinates,
                 shuffle=self.shuffle,
                 force_normalize=False,
+                include_emissions=self.include_emissions,
             )
 
     def train_dataloader(self):
@@ -546,6 +649,8 @@ def get_normalization_stats(h5_file: str) -> Dict:
         {
             'input_mean': {'PS': float, 'U': float, ...},
             'input_std': {'PS': float, 'U': float, ...},
+            'emission_mean': {0: float, 1: float, ...},
+            'emission_std': {0: float, 1: float, ...},
             'output_mean': {
                 'mmr': {0: float, 1: float, ...},
                 'dry_dep': {0: float, 1: float, ...},
@@ -574,6 +679,8 @@ def get_normalization_stats(h5_file: str) -> Dict:
         stats = {
             "input_mean": {},
             "input_std": {},
+            "emission_mean": {},
+            "emission_std": {},
             "output_mean": {"mmr": {}, "dry_dep": {}, "wet_dep": {}},
             "output_std": {"mmr": {}, "dry_dep": {}, "wet_dep": {}},
             "mmr_log_scale": {},
@@ -588,10 +695,21 @@ def get_normalization_stats(h5_file: str) -> Dict:
             stats["input_mean"][var] = float(norm_group[f"{var}_mean"][()])
             stats["input_std"][var] = float(norm_group[f"{var}_std"][()])
 
-        # Get number of particles from MMR stats
+        # Get emission stats if they exist
         n_particles = 0
-        while f"mmr_{n_particles}_mean" in norm_group:
+        while f"emission_{n_particles}_mean" in norm_group:
+            stats["emission_mean"][n_particles] = float(
+                norm_group[f"emission_{n_particles}_mean"][()]
+            )
+            stats["emission_std"][n_particles] = float(
+                norm_group[f"emission_{n_particles}_std"][()]
+            )
             n_particles += 1
+
+        # If no emission stats found, determine n_particles from MMR stats
+        if n_particles == 0:
+            while f"mmr_{n_particles}_mean" in norm_group:
+                n_particles += 1
 
         # Get output stats
         for size_idx in range(n_particles):
@@ -648,6 +766,7 @@ if __name__ == "__main__":
         # print(batch[1][2].shape)  # [1, 6, 384, 576]
         print_memory_allocated()
 
+        # y = y[:, :, -1, :, :]
         print(f"Y range: {y.min()} - {y.max()}")
 
         break
