@@ -757,13 +757,10 @@ if __name__ == "__main__":
 
     for batch in train_dataloader:
         X, y = batch
-        print(X.shape)  # [1, 8, 48, 384, 576]
+        print(X.shape)  # [1, 11, 48, 384, 576]
         print_tensor_memory(X)
-        print(y.shape)  # [1, 6, 48, 384, 576]
+        print(y.shape)  # [1, 6, 50, 384, 576]
         print_tensor_memory(y)
-        # print(batch[1][0].shape)  # [1, 6, 48, 384, 576]
-        # print(batch[1][1].shape)  # [1, 6, 384, 576]
-        # print(batch[1][2].shape)  # [1, 6, 384, 576]
         print_memory_allocated()
 
         # y = y[:, :, -1, :, :]

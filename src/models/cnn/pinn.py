@@ -34,6 +34,7 @@ class CNNPINN(Base):
         conservation_weight=0.1,
         physics_weight=0.1,
         settling_velocities=None,
+        output_altitude_dim=None,
         **kwargs,
     ):
         """
@@ -50,6 +51,7 @@ class CNNPINN(Base):
             conservation_weight: Weight for conservation loss term
             physics_weight: Weight for physics loss term
             settling_velocities: Optional custom settling velocities
+            output_altitude_dim: Optional output altitude dimension (if different from input)
         """
         super().__init__(
             mmr_weight=mmr_weight,
@@ -94,7 +96,29 @@ class CNNPINN(Base):
             tensor: MMR predictions [batch_size, n_particles, altitude, latitude, longitude]
                    with values constrained to [0,1] via sigmoid activation
         """
-        return torch.sigmoid(self.network(x))
+        output = self.network(x)
+
+        # Apply sigmoid to constrain values between 0 and 1
+        output = torch.sigmoid(output)
+
+        # Handle different altitude dimensions if needed
+        if (
+            self.hparams.output_altitude_dim is not None
+            and self.hparams.output_altitude_dim != output.shape[2]
+        ):
+            # Resize in the altitude dimension using interpolation
+            output = F.interpolate(
+                output,
+                size=(
+                    self.hparams.output_altitude_dim,
+                    output.shape[3],
+                    output.shape[4],
+                ),
+                mode="trilinear",
+                align_corners=False,
+            )
+
+        return output
 
 
 if __name__ == "__main__":
@@ -102,20 +126,19 @@ if __name__ == "__main__":
     from src.utils import count_parameters
 
     # Test model
-    model = CNNPINN()
+    model = CNNPINN(in_channels=11, output_altitude_dim=48 + 2)  # MMR + WetDep + DryDep
     print(f"Number of parameters: {count_parameters(model)}")
 
     # Test forward pass
-    x = torch.randn(1, 7, 48, 600, 400)
+    x = torch.randn(1, 11, 48, 384, 576)
     start_time = time.time()
     predictions = model(x)
     print(f"Forward pass time: {time.time() - start_time:.3f} seconds")
     print(f"Output shape: {predictions.shape}")
 
     # Test loss computation
-    y = torch.randn(1, 6, 48, 600, 400)
-    cell_area = torch.randn(600, 400)
-    losses = model.compute_loss(x, predictions, y, cell_area)
+    y = torch.randn(1, 6, 50, 384, 576)
+    losses = model.compute_loss(x, predictions, y)
     print("Loss computation successful")
 
     start_time = time.time()

@@ -114,8 +114,21 @@ class Base(pl.LightningModule, ABC):
         if self.hparams.use_physics_loss:
             return self.compute_physics_loss(x, mmr_pred, mmr_true, dt)
         else:
-            # Shape [1, 6, 48, 384, 576]
-            # Create altitude weights (exponentially decreasing with height)
+            # Shape [1, 6, 50, 384, 576]
+            # MMR [1, 6, :-2, 384, 576]
+            # Dry + Wet Deposition [1, -2:, 50, 384, 576]
+
+            # Split the prediction and ground truth into MMR and depositions
+            n_particles = mmr_pred.shape[1]
+            mmr_particles = mmr_pred[:, : n_particles - 2]  # All except last 2 channels
+            deposition_particles = mmr_pred[
+                :, -2:
+            ]  # Last 2 channels (dry and wet deposition)
+
+            mmr_true_particles = mmr_true[:, : n_particles - 2]
+            deposition_true_particles = mmr_true[:, -2:]
+
+            # Create altitude weights (exponentially decreasing with height) for MMR
             altitude_dim = mmr_pred.shape[2]
             altitude_weights = torch.exp(
                 -torch.arange(altitude_dim, device=mmr_pred.device) * 0.5
@@ -126,14 +139,20 @@ class Base(pl.LightningModule, ABC):
             )
             altitude_weights = altitude_weights.view(1, 1, -1, 1, 1)
 
-            # Apply weights to squared differences
-            squared_diff = (mmr_pred - mmr_true) ** 2
-            weighted_squared_diff = squared_diff * altitude_weights
+            # Apply weights to squared differences for MMR
+            mmr_squared_diff = (mmr_particles - mmr_true_particles) ** 2
+            mmr_weighted_squared_diff = mmr_squared_diff * altitude_weights
+            mmr_loss = mmr_weighted_squared_diff.mean()
 
-            # Take mean over all dimensions
-            loss = weighted_squared_diff.mean()
+            # Apply weight of 2 to depositions
+            deposition_loss = 2.0 * F.mse_loss(
+                deposition_particles, deposition_true_particles
+            )
 
-            return {"total": loss}
+            # Combine losses
+            total_loss = mmr_loss + deposition_loss
+
+            return {"total": total_loss, "mmr": mmr_loss, "deposition": deposition_loss}
 
     def compute_physics_loss(self, x, mmr_pred, mmr_true, dt=1.0):
         """
