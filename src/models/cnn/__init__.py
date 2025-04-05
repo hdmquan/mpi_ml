@@ -1,3 +1,4 @@
-from .pinn import CNNPINN
+from .pinn_monolith import CNNPINN
+from .pinn_stream import CNNPINNStream
 
-__all__ = ["CNNPINN"]
+__all__ = ["CNNPINN", "CNNPINNStream"]
