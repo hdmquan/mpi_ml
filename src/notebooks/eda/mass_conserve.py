@@ -1,7 +1,3 @@
-# %% [markdown]
-# # Mass Conservation Analysis
-# This notebook analyzes temporal evolution of wet/dry deposition, surface emissions, and mass mixing ratio (MMR) for different particle sizes.
-
 # %% Imports
 import h5py
 import numpy as np
@@ -100,7 +96,8 @@ fig.show()
 # MMR unit is kg/kg/cell_volume
 # Deposition unit is kg/cell_area
 # To able to make mass conservation check we need to convert everything to kg
-# Formula is MMR_sum * accounted_atmosphere_weight = source_sum * earth_surface_area + wet_deposition_sum + dry_deposition_sum
+# Formula is MMR_sum * accounted_atmosphere_weight = source_avg * earth_surface_area + wet_deposition_sum + dry_deposition_sum
+# source_avg should be calculated carefully as cell area is not constant
 # Hence accounted_atmosphere_weight = (source_sum * earth_surface_area + wet_deposition_sum + dry_deposition_sum) / MMR_sum
 
 # %% Constants and Calculations
@@ -283,119 +280,5 @@ for size in acc_weight_df["particle_size"].unique():
 
     except Exception as e:
         print(f"Could not fit cosine model for {size}: {e}")
-
-# %% Demonstrate MMR correction for a sample particle size
-if not cosine_params:
-    print("No cosine parameters available for correction")
-else:
-    sample_size = list(cosine_params.keys())[0]
-    sample_data = df[df["particle_size"] == sample_size]
-
-    # Apply correction to sample data
-    corrected_mmr = []
-    for _, row in sample_data.iterrows():
-        # Apply seasonal correction to MMR based on fitted cosine models
-        params = cosine_params[sample_size]
-        first_timestamp = "2013-01"
-        days = timestamp_to_days(row["timestamp"], first_timestamp)
-
-        # Calculate correction factor based on cosine model
-        seasonal_factor = (
-            cosine_model(
-                days, params["amplitude"], params["phase"], params["vertical_shift"]
-            )
-            / params["vertical_shift"]
-        )
-
-        # Apply correction
-        corrected = row["mmr"] * seasonal_factor
-        corrected_mmr.append(corrected)
-
-    # Plot comparison of original vs corrected MMR
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=sample_data["timestamp"],
-            y=sample_data["mmr"],
-            name="Original MMR",
-            line=dict(color="blue"),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=sample_data["timestamp"],
-            y=corrected_mmr,
-            name="Corrected MMR",
-            line=dict(color="red"),
-        )
-    )
-    fig.update_layout(
-        title=f"Original vs Seasonally Corrected MMR for {sample_size}",
-        xaxis_title="Time",
-        yaxis_title="Mass Mixing Ratio",
-        height=600,
-        width=1000,
-        showlegend=True,
-    )
-    fig.show()
-
-    # Check if correction improves mass conservation
-    print("\nMass Conservation Check:")
-    original_conservation = conservation_df[
-        conservation_df["particle_size"] == sample_size
-    ]["conservation_ratio"].values
-
-    # Calculate new conservation ratio with corrected MMR
-    new_conservation = []
-    size_weight_df = acc_weight_df[acc_weight_df["particle_size"] == sample_size]
-
-    for idx, row in enumerate(sample_data.itertuples()):
-        acc_weight = size_weight_df[size_weight_df["timestamp"] == row.timestamp][
-            "accounted_weight"
-        ].values[0]
-
-        theoretical_mass = corrected_mmr[idx] * acc_weight
-        actual_mass = row.source_mass + row.wet_deposition + row.dry_deposition
-        new_ratio = theoretical_mass / actual_mass if actual_mass != 0 else np.nan
-        new_conservation.append(new_ratio)
-
-    # Plot comparison of original vs corrected conservation ratios
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=sample_data["timestamp"],
-            y=new_conservation,
-            name="Corrected Conservation Ratio",
-            line=dict(color="red"),
-        )
-    )
-    fig.add_hline(
-        y=1.0,
-        line_dash="dash",
-        line_color="black",
-        annotation_text="Perfect Conservation",
-    )
-    fig.update_layout(
-        title=f"Conservation Ratio with Cosine Correction for {sample_size}",
-        xaxis_title="Time",
-        yaxis_title="Conservation Ratio",
-        height=600,
-        width=1000,
-        showlegend=True,
-    )
-    fig.show()
-
-    # Calculate and print improvement metrics
-    original_deviation = np.mean(np.abs(np.array(original_conservation) - 1.0))
-    corrected_deviation = np.mean(np.abs(np.array(new_conservation) - 1.0))
-    improvement = (original_deviation - corrected_deviation) / original_deviation * 100
-
-    print(
-        f"Average deviation from perfect conservation (original): {original_deviation:.4f}"
-    )
-    print(
-        f"Average deviation from perfect conservation (corrected): {corrected_deviation:.4f}"
-    )
-    print(f"Improvement: {improvement:.2f}%")
 
 # %%

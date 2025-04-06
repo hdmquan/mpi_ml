@@ -28,7 +28,7 @@ def setup_metadata(hf: h5py.File, nc: Dataset) -> Tuple[h5py.Group, Dict[str, in
     metadata_grp = hf.create_group("metadata")
 
     # Store coordinates and their attributes
-    for coord in ["lon", "lat", "lev"]:
+    for coord in ["lon", "lat", "lev", "gw"]:
         dataset = metadata_grp.create_dataset(coord, data=nc.variables[coord][:])
         for attr_name, attr_value in nc.variables[coord].__dict__.items():
             if attr_name != "_FillValue":

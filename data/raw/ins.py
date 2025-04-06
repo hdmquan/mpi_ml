@@ -39,3 +39,7 @@ with Dataset(sample, "r") as nc:
     print("\nGlobal Attributes:")
     for attr_name in nc.ncattrs():
         print(f"- {attr_name}: {getattr(nc, attr_name)}")
+
+    print(nc.variables["gw"][:5])
+
+# %%

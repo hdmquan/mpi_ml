@@ -16,8 +16,7 @@ class Base(pl.LightningModule, ABC):
         self,
         in_channels=7,
         out_channels=6,
-        mmr_weight=1.0,
-        physics_weight=1.0,
+        transport_loss_weight=1.0,
         settling_velocities=None,
         include_coordinates=True,
         use_physics_loss=False,
@@ -114,160 +113,130 @@ class Base(pl.LightningModule, ABC):
         if self.hparams.use_physics_loss:
             return self.compute_physics_loss(x, mmr_pred, mmr_true, dt)
         else:
-            # Shape [1, 6, 50, 384, 576]
-            # MMR [1, 6, :-2, 384, 576]
-            # Dry + Wet Deposition [1, -2:, 50, 384, 576]
+            return self.compute_traditional_loss(x, mmr_pred, mmr_true, dt)["total"]
 
-            # Split the prediction and ground truth into MMR and depositions
-            n_particles = mmr_pred.shape[1]
-            mmr_particles = mmr_pred[:, : n_particles - 2]  # All except last 2 channels
-            deposition_particles = mmr_pred[
-                :, -2:
-            ]  # Last 2 channels (dry and wet deposition)
+    def compute_traditional_loss(self, x, pred, true, dt=1.0):
+        # Shape [1, 6, 50, 384, 576]
+        # MMR [1, 6, :-2, 384, 576]
+        # Dry + Wet Deposition [1, -2:, 50, 384, 576]
 
-            mmr_true_particles = mmr_true[:, : n_particles - 2]
-            deposition_true_particles = mmr_true[:, -2:]
+        n_particles = pred.shape[1]
+        mmr_particles = pred[:, :, :-2, :, :]
+        deposition_particles = pred[:, :, -2:, :, :]
 
-            # Create altitude weights (exponentially decreasing with height) for MMR
-            altitude_dim = mmr_pred.shape[2]
-            altitude_weights = torch.exp(
-                -torch.arange(altitude_dim, device=mmr_pred.device) * 0.5
-            )
-            # Normalize weights to range from 2 to 1
-            altitude_weights = 1 + (altitude_weights - altitude_weights.min()) / (
-                altitude_weights.max() - altitude_weights.min()
-            )
-            altitude_weights = altitude_weights.view(1, 1, -1, 1, 1)
+        mmr_true_particles = true[:, :, :-2, :, :]
+        deposition_true_particles = true[:, :, -2:, :, :]
 
-            # Apply weights to squared differences for MMR
-            mmr_squared_diff = (mmr_particles - mmr_true_particles) ** 2
-            mmr_weighted_squared_diff = mmr_squared_diff * altitude_weights
-            mmr_loss = mmr_weighted_squared_diff.mean()
+        # Altitude weights
+        # Decrese exponentially as altitude increases
+        # From 2 at the surface to 1 at the top
+        alt_dim = pred.shape[2]
+        weights = torch.exp(-torch.arange(alt_dim, device=pred.device) * 0.5)
+        weights = 1 + (weights - weights.min()) / (weights.max() - weights.min())
+        weights = weights.view(1, 1, -1, 1, 1)
 
-            # Apply weight of 2 to depositions
-            deposition_loss = 2.0 * F.mse_loss(
-                deposition_particles, deposition_true_particles
-            )
+        # Apply weights to squared differences
+        mmr_squared_diff = (mmr_particles - mmr_true_particles) ** 2
+        mmr_weighted_squared_diff = mmr_squared_diff * weights
+        mmr_loss = mmr_weighted_squared_diff.mean()
 
-            # Combine losses
-            total_loss = mmr_loss + deposition_loss
+        # Apply weight of 2 to depositions (because it's more important than higher altitudes mmr)
+        deposition_loss = 2.0 * F.mse_loss(
+            deposition_particles, deposition_true_particles
+        )
 
-            return {"total": total_loss, "mmr": mmr_loss, "deposition": deposition_loss}
+        total_loss = mmr_loss + deposition_loss
 
-    def compute_physics_loss(self, x, mmr_pred, mmr_true, dt=1.0):
-        """
-        Compute physics-informed losses for MMR predictions.
+        return {"total": total_loss, "mmr": mmr_loss, "deposition": deposition_loss}
 
-        Args:
-            x: Input features [batch_size, in_channels, altitude, latitude, longitude]
-            mmr_pred: MMR predictions [batch_size, n_particles, altitude, latitude, longitude]
-            mmr_true: MMR true values [batch_size, n_particles, altitude, latitude, longitude]
-            cell_area: Area of each grid cell [height, width]
-            dt: Time step (right now we don't do time-dependent simulations)
-        """
-        batch_size, n_particles, altitude, latitude, longitude = mmr_pred.shape
-        device = mmr_pred.device
+    def compute_physics_loss(self, x, pred, true, dt=1.0):
+        losses = {}
 
-        ps = x[:, [0]]  # Pressure
+        losses["traditional"] = self.compute_traditional_loss(x, pred, true, dt)[
+            "total"
+        ]
+
+        mmr = pred[:, :, :-2, :, :]
+        dry_dep = pred[:, :, -2, :, :]
+        wet_dep = pred[:, :, -1, :, :]
+
+        batch_size, n_particles, altitude, latitude, longitude = mmr.shape
+        device = pred.device
+
         u = x[:, [1]]  # Wind East
         v = x[:, [2]]  # Wind North
-        emissions = x[:, [-1]]
+        emissions = x[:, -6:]  # Emissions for each particle size
 
-        # logger.info("Initial shapes")
-
-        # logger.debug(f"Pressure: {ps.shape}")
-        # logger.debug(f"Wind East: {u.shape}")
-        # logger.debug(f"Wind North: {v.shape}")
-        # logger.debug(f"Emissions: {emissions.shape}")
-
-        # Settling velocity
         v_s = (
             self.settling_vel.view(1, -1, 1, 1, 1)
             .expand(batch_size, -1, altitude, latitude, longitude)
             .to(device)
         )
 
-        # logger.debug(f"Settling velocity: {v_s.shape}")
+        # Transport loss (advection + diffusion)
+        #     u · ∇C            Advection (transport by wind)
+        #   - ∇ · (D ∇C)        Diffusion (spread by turbulent mixing)
+        #   + vs * ∂C/∂z        Settling (falling by gravity)
+        #   = S                 Source
 
-        losses = {}
+        # Create coordinate grids
+        z = torch.arange(altitude, device=device).float()
+        y = torch.arange(latitude, device=device).float()
+        x = torch.arange(longitude, device=device).float()
 
-        # L_mmr = (1/N) Σ (MMR pred - MMR true)^2
-        losses["mmr"] = F.mse_loss(mmr_pred, mmr_true)
+        # Expand to match the shape of mmr
+        z = z.view(1, 1, -1, 1, 1).expand_as(mmr)
+        y = y.view(1, 1, 1, -1, 1).expand_as(mmr)
+        x = x.view(1, 1, 1, 1, -1).expand_as(mmr)
 
-        # NOTE: Turn out it varied over months.
-        # L_mass = (∫∫∫ ρ·MMR dV - ∫∫ Emissions dA)²
-        # Store the original emissions shape before summation
-        # ρ is ignore since this is a loss
-        # mass_true = (mmr_true * cell_area[None, None, None, :, :]).sum(dim=(-2, -1))
-        # mass_pred = (mmr_pred * cell_area[None, None, None, :, :]).sum(dim=(-2, -1))
-        # emissions_sum = (emissions * cell_area[None, None, None, :, :]).sum(
-        #     dim=(-2, -1)
-        # )
+        # Make coordinates require gradients
+        z.requires_grad_(True)
+        y.requires_grad_(True)
+        x.requires_grad_(True)
 
-        # mass_conservation_error = (mass_pred - mass_true) - emissions_sum
-        # total_mass = torch.abs(mass_true).mean() + torch.abs(emissions_sum).mean()
-        # losses["mass_conservation"] = torch.mean(
-        #     (mass_conservation_error / (total_mass + 1e-8)) ** 2
-        # )
+        # Compute gradients
+        grad_Cz = torch.autograd.grad(
+            mmr, z, grad_outputs=torch.ones_like(mmr), create_graph=True
+        )[0]
+        grad_Cy = torch.autograd.grad(
+            mmr, y, grad_outputs=torch.ones_like(mmr), create_graph=True
+        )[0]
+        grad_Cx = torch.autograd.grad(
+            mmr, x, grad_outputs=torch.ones_like(mmr), create_graph=True
+        )[0]
 
-        # logger.info("Transport loss")
+        # Compute advection
+        advection = u * grad_Cx + v * grad_Cy
 
-        # L_transport = ∫∫∫ (∂C/∂t + u·∂C/∂x + v·∂C/∂y + w·∂C/∂z - K_h∇²C - K_v∂²C/∂z² - S)² dV dt
-        dC_dt = (mmr_pred - mmr_true) / dt
+        # Settling
+        settling = v_s * grad_Cz
 
-        # Spatial derivatives (central differences with periodic padding)
-        mmr_pad = F.pad(mmr_pred, (1, 1, 1, 1, 0, 0), mode="circular")
-        dx, dy, dz = 1.0, 1.0, 1.0
+        # Simplified diffusion term (using constant diffusion coefficient)
+        D = 1.0  # Diffusion coefficient
 
-        dC_dx = (mmr_pad[:, :, :, 1:-1, 2:] - mmr_pad[:, :, :, 1:-1, :-2]) / (2 * dx)
-        dC_dy = (mmr_pad[:, :, :, 2:, 1:-1] - mmr_pad[:, :, :, :-2, 1:-1]) / (2 * dy)
+        # Compute second derivatives for Laplacian
+        laplacian_x = torch.autograd.grad(
+            grad_Cx, x, grad_outputs=torch.ones_like(grad_Cx), create_graph=True
+        )[0]
+        laplacian_y = torch.autograd.grad(
+            grad_Cy, y, grad_outputs=torch.ones_like(grad_Cy), create_graph=True
+        )[0]
+        laplacian_z = torch.autograd.grad(
+            grad_Cz, z, grad_outputs=torch.ones_like(grad_Cz), create_graph=True
+        )[0]
 
-        # Vertical derivatives (zero-padding for top/bottom boundaries)
-        mmr_pad_z = F.pad(mmr_pred, (0, 0, 0, 0, 1, 1), mode="replicate")
-        dC_dz = (mmr_pad_z[:, :, 2:, :, :] - mmr_pad_z[:, :, :-2, :, :]) / (2 * dz)
+        laplacian = laplacian_x + laplacian_y + laplacian_z
+        diffusion = D * laplacian
 
-        # logger.debug(f"MMR pad: {mmr_pad.shape}")
-        # logger.debug(f"dC_dt: {dC_dt.shape}")
-        # logger.debug(f"dC_dx: {dC_dx.shape}")
-        # logger.debug(f"dC_dy: {dC_dy.shape}")
+        # Residual (transport equation)
+        residual = advection - diffusion + settling - emissions
 
-        # Horizontal diffusion term (Laplace)
-        d2C_dx2 = (
-            mmr_pad[:, :, :, 1:-1, 2:] - 2 * mmr_pred + mmr_pad[:, :, :, 1:-1, :-2]
-        ) / (dx**2)
-        d2C_dy2 = (
-            mmr_pad[:, :, :, 2:, 1:-1] - 2 * mmr_pred + mmr_pad[:, :, :, :-2, 1:-1]
-        ) / (dy**2)
-        d2C_dz2 = (
-            mmr_pad_z[:, :, 2:, :, :] - 2 * mmr_pred + mmr_pad_z[:, :, :-2, :, :]
-        ) / (dz**2)
+        # Transport loss
+        losses["transport"] = torch.mean(residual**2)
 
-        laplacian_C = d2C_dx2 + d2C_dy2 + d2C_dz2
-
-        # logger.debug(f"Laplacian: {laplacian_C.shape}")
-
-        Kh = 1.0  # Horizontal diffusion coefficient
-        Kv = 0.1  # Vertical diffusion coefficient
-        diffusion_term = Kh * (d2C_dx2 + d2C_dy2) + Kv * d2C_dz2
-
-        # Expand emissions to match particle and altitude dimensions
-        emissions_grid = emissions.expand(-1, mmr_pred.size(1), altitude, -1, -1)
-
-        transport_residual = (
-            dC_dt
-            + u * dC_dx
-            + v * dC_dy
-            + v_s * dC_dz
-            - diffusion_term
-            - emissions_grid
-        )
-        losses["transport"] = torch.mean(transport_residual**2)
-
-        # Total loss
         total_loss = (
-            self.hparams.mmr_weight * losses["mmr"]
-            # + self.hparams.conservation_weight * losses["mass_conservation"]
-            + self.hparams.physics_weight * losses["transport"]
+            losses["traditional"]
+            + self.hparams.transport_loss_weight * losses["transport"]
         )
 
         losses["total"] = total_loss
@@ -279,18 +248,14 @@ class LinearModel(Base):
         self,
         in_channels=7,
         out_channels=6,
-        mmr_weight=1.0,
-        conservation_weight=0.1,
-        physics_weight=0.1,
+        transport_loss_weight=1.0,
         use_physics_loss=False,
         **kwargs,
     ):
         super().__init__(
             in_channels=in_channels,
             out_channels=out_channels,
-            mmr_weight=mmr_weight,
-            conservation_weight=conservation_weight,
-            physics_weight=physics_weight,
+            transport_loss_weight=transport_loss_weight,
             use_physics_loss=use_physics_loss,
             **kwargs,
         )
@@ -318,18 +283,14 @@ if __name__ == "__main__":
     model_no_physics = LinearModel(
         in_channels=5,
         out_channels=6,
-        mmr_weight=1.0,
-        conservation_weight=0.1,
-        physics_weight=0.1,
+        transport_loss_weight=1.0,
         use_physics_loss=False,
     )
 
     model_with_physics = LinearModel(
         in_channels=5,
         out_channels=6,
-        mmr_weight=1.0,
-        conservation_weight=0.1,
-        physics_weight=0.1,
+        transport_loss_weight=1.0,
         use_physics_loss=True,
     )
 
