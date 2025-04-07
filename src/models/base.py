@@ -161,8 +161,10 @@ class Base(pl.LightningModule, ABC):
         dry_dep_true = true[:, :, -2, :, :]
         wet_dep_true = true[:, :, -1, :, :]
 
+        # print(pred.shape, true.shape)
+
         # Altitude weights
-        # Decrese exponentially as altitude increases
+        # Decrease exponentially as altitude increases
         # From 2 at the surface to 1 at the top
         alt_dim = mmr_pred.shape[2]
         weights = torch.exp(-torch.arange(alt_dim, device=pred.device) * 0.5)
@@ -170,6 +172,7 @@ class Base(pl.LightningModule, ABC):
         weights = weights.view(1, 1, -1, 1, 1)
 
         # Apply weights to squared differences
+        print(mmr_pred.shape, mmr_true.shape)
         mmr_squared_diff = (mmr_pred - mmr_true) ** 2
         mmr_weighted_squared_diff = mmr_squared_diff * weights
         mmr_loss = mmr_weighted_squared_diff.mean()
@@ -315,6 +318,9 @@ class Base(pl.LightningModule, ABC):
             return torch.mean(residual**2)
 
         except RuntimeError as e:
+            import traceback
+
+            print(traceback.format_exc())
             # Fallback to a simpler transport loss if we encounter gradient issues
             print(f"Warning: Using simplified transport loss due to error: {e}")
 

@@ -123,7 +123,7 @@ if __name__ == "__main__":
     import time
     from src.utils import count_parameters
 
-    model = CNNPINNStream(output_altitude_dim=50)
+    model = CNNPINNStream(output_altitude_dim=50, use_physics_loss=True)
     print(f"Number of parameters: {count_parameters(model)}")
 
     x = torch.randn(1, 11, 48, 384, 576)
