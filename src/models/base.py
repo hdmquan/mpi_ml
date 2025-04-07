@@ -110,22 +110,25 @@ class Base(pl.LightningModule, ABC):
         }
 
     def compute_loss(self, x, mmr_pred, mmr_true, dt=1.0):
+        mse = self.compute_traditional_loss(mmr_pred, mmr_true)
         if self.hparams.use_physics_loss:
-            return self.compute_physics_loss(x, mmr_pred, mmr_true, dt)
+            L_transport = self.compute_transport_loss(x, mmr_pred)
+            return L_transport + mse["total"]
         else:
-            return self.compute_traditional_loss(x, mmr_pred, mmr_true, dt)["total"]
+            return mse["total"]
 
-    def compute_traditional_loss(self, x, pred, true, dt=1.0):
+    def compute_traditional_loss(self, pred, true):
         # Shape [1, 6, 50, 384, 576]
         # MMR [1, 6, :-2, 384, 576]
         # Dry + Wet Deposition [1, -2:, 50, 384, 576]
 
-        n_particles = pred.shape[1]
-        mmr_particles = pred[:, :, :-2, :, :]
-        deposition_particles = pred[:, :, -2:, :, :]
+        mmr_pred = pred[:, :, :-2, :, :]
+        dry_dep_pred = pred[:, :, -2, :, :]
+        wet_dep_pred = pred[:, :, -1, :, :]
 
-        mmr_true_particles = true[:, :, :-2, :, :]
-        deposition_true_particles = true[:, :, -2:, :, :]
+        mmr_true = true[:, :, :-2, :, :]
+        dry_dep_true = true[:, :, -2, :, :]
+        wet_dep_true = true[:, :, -1, :, :]
 
         # Altitude weights
         # Decrese exponentially as altitude increases
@@ -136,29 +139,23 @@ class Base(pl.LightningModule, ABC):
         weights = weights.view(1, 1, -1, 1, 1)
 
         # Apply weights to squared differences
-        mmr_squared_diff = (mmr_particles - mmr_true_particles) ** 2
+        mmr_squared_diff = (mmr_pred - mmr_true) ** 2
         mmr_weighted_squared_diff = mmr_squared_diff * weights
         mmr_loss = mmr_weighted_squared_diff.mean()
 
         # Apply weight of 2 to depositions (because it's more important than higher altitudes mmr)
-        deposition_loss = 2.0 * F.mse_loss(
-            deposition_particles, deposition_true_particles
+        deposition_loss = 2.0 * (
+            F.mse_loss(dry_dep_pred, dry_dep_true)
+            + F.mse_loss(wet_dep_pred, wet_dep_true)
         )
 
         total_loss = mmr_loss + deposition_loss
 
         return {"total": total_loss, "mmr": mmr_loss, "deposition": deposition_loss}
 
-    def compute_physics_loss(self, x, pred, true, dt=1.0):
-        losses = {}
-
-        losses["traditional"] = self.compute_traditional_loss(x, pred, true, dt)[
-            "total"
-        ]
+    def compute_transport_loss(self, x, pred):
 
         mmr = pred[:, :, :-2, :, :]
-        dry_dep = pred[:, :, -2, :, :]
-        wet_dep = pred[:, :, -1, :, :]
 
         batch_size, n_particles, altitude, latitude, longitude = mmr.shape
         device = pred.device
@@ -211,8 +208,8 @@ class Base(pl.LightningModule, ABC):
         # Settling
         settling = v_s * grad_Cz
 
-        # Simplified diffusion term (using constant diffusion coefficient)
-        D = 1.0  # Diffusion coefficient
+        # Simplified diffusion term since we are calc loss not simulate
+        D = 1.0
 
         # Compute second derivatives for Laplacian
         laplacian_x = torch.autograd.grad(
@@ -232,15 +229,75 @@ class Base(pl.LightningModule, ABC):
         residual = advection - diffusion + settling - emissions
 
         # Transport loss
-        losses["transport"] = torch.mean(residual**2)
+        return torch.mean(residual**2)
 
-        total_loss = (
-            losses["traditional"]
-            + self.hparams.transport_loss_weight * losses["transport"]
-        )
+    def compute_mass_loss(self, x, pred, true):
+        # Mass conservation loss
+        pass
 
-        losses["total"] = total_loss
-        return losses
+    @staticmethod
+    def calculate_mp_mass(
+        mmr, ps, hyai, hybi, gw, p0, g=9.8
+    ):  # g = 9.80665 but c'mon I'm an engineer
+        """
+        Calculate the total mass of microplastic particles across all altitude levels.
+
+        Args:
+            mmr: Microplastic mass mixing ratio [batch_size, n_particles, altitude, latitude, longitude]
+            ps: Surface pressure [batch_size, latitude, longitude]
+            hyai: Hybrid A coefficient for interfaces
+            hybi: Hybrid B coefficient for interfaces
+            gw: Gaussian weights for latitude
+            p0: Reference pressure
+            g: Gravitational acceleration (default: 9.8 m/s^2)
+
+        Returns:
+            mp_mass: Total mass of microplastic particles [batch_size, n_particles]
+        """
+        _, _, n_levels, _, _ = mmr.shape
+        device = mmr.device
+
+        if not isinstance(hyai, torch.Tensor):
+            hyai = torch.tensor(hyai, dtype=torch.float32, device=device)
+
+        if not isinstance(hybi, torch.Tensor):
+            hybi = torch.tensor(hybi, dtype=torch.float32, device=device)
+
+        if not isinstance(gw, torch.Tensor):
+            gw = torch.tensor(gw, dtype=torch.float32, device=device)
+
+        if not isinstance(p0, torch.Tensor):
+            p0 = torch.tensor(p0, dtype=torch.float32, device=device)
+
+        # (batch, 384, 576)
+        ps = ps.unsqueeze(1).unsqueeze(1)  # [batch, 1, 1, 384, 576]
+
+        hyai = hyai.view(1, 1, -1, 1, 1)  # [1, 1, 49, 1, 1]
+        hybi = hybi.view(1, 1, -1, 1, 1)  # [1, 1, 49, 1, 1]
+
+        # Pressure at interfaces
+        # P_interface[k, i, j] = hyai[k] * P0 + hybi[k] * PS[i, j]
+        p_interface = hyai * p0 + hybi * ps  # [batch, 1, 49, 384, 576]
+
+        # Pressure differences
+        # deltaP[k, i, j] = P_interface[k+1, i, j] - P_interface[k, i, j]
+        delta_p = (
+            p_interface[:, :, 1 : n_levels + 1] - p_interface[:, :, :n_levels]
+        )  # [batch, 1, 48, 384, 576]
+
+        # [1, 1, 1, 384, 1]
+        gw = gw.view(1, 1, 1, -1, 1)
+
+        # Compute air mass in each grid cell
+        # air_mass[k, i, j] = (deltaP[k, i, j] * gw[i, j]) / g
+        air_mass = (delta_p * gw) / g  # [batch, 1, 48, 384, 576]
+
+        # Compute microplastic mass in each grid cell
+        mp_cell_mass = mmr * air_mass  # [batch, n_particles, 48, 384, 576]
+
+        mp_mass = mp_cell_mass.sum(dim=(2, 3, 4))  # [batch, n_particles]
+
+        return mp_mass
 
 
 class LinearModel(Base):

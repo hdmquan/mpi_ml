@@ -35,7 +35,7 @@ def setup_metadata(hf: h5py.File, nc: Dataset) -> Tuple[h5py.Group, Dict[str, in
                 dataset.attrs[attr_name] = attr_value
 
     # Store vertical coordinate transformations
-    for var in ["hyam", "hybm", "P0"]:
+    for var in ["hyam", "hybm", "hyai", "hybi", "P0"]:
         metadata_grp.create_dataset(var, data=nc.variables[var][:])
 
     # Get dimensions

@@ -56,32 +56,58 @@ class MPIDataset(Dataset):
         self.include_emissions = include_emissions
         self._prepare_indices()
 
+        self._file_handle = None
+
         # Metadata
         with h5py.File(self.h5_file, "r") as h5f:
             self.lats = h5f["metadata/lat"][:]
             self.lons = h5f["metadata/lon"][:]
+
             self.settling_velocities = h5f["metadata/settling_velocity"][:]
 
-            ## Cell area
-            lat_res = np.abs(self.lats[1] - self.lats[0])
-            lon_res = np.abs(self.lons[1] - self.lons[0])
+            self.P0 = h5f["metadata/P0"]
+            self.gw = h5f["metadata/gw"][:]
+
+            self.hyam = h5f["metadata/hyam"][:]
+            self.hybm = h5f["metadata/hybm"][:]
+
+            self.hyai = h5f["metadata/hyai"][:]
+            self.hybi = h5f["metadata/hybi"][:]
 
             # Earth radius
             R = 6371000
 
-            # Mesh
-            lat_grid, lon_grid = np.meshgrid(self.lats, self.lons, indexing="ij")
+            self.cell_area = 2 * np.pi * R**2 * self.gw[:, np.newaxis]
 
-            self.cell_area = (
-                np.radians(lat_res)
-                * np.radians(lon_res)
-                * R**2
-                * np.cos(np.radians(lat_grid))
-            )
+            n_particles = len(self.settling_velocities)
+
+            emission_tensors = []
+            raw_emission = []
+            for size_idx in range(n_particles):
+                # Since source emissions are constant, we only need to load the first
+                emission_raw = h5f[
+                    f"outputs/emissions/Plast0{size_idx+1}_SRF_EMIS_avrg"
+                ][0]
+                emission_tensor = torch.from_numpy(emission_raw).to(torch.float32)
+                raw_emission.append(emission_tensor)
+
+                if self.normalize:
+                    emission_tensor = (
+                        emission_tensor - self.emission_mean[size_idx]
+                    ) / self.emission_std[size_idx]
+
+                # Expand to 3D to match other inputs
+                emission_3d = emission_tensor.repeat(1, 1)
+                emission_tensors.append(emission_3d)
+
+            self.emissions = torch.stack(emission_tensors)
+            raw_emissions = torch.stack(raw_emission)
+
+            self.emission_mass = torch.sum(raw_emissions.sum(dim=1) * self.cell_area)
 
             self._normalize(h5f, force_normalize=force_normalize)
 
-        self._file_handle = None
+            del raw_emissions, emission_tensors, emission_raw, R, n_particles
 
     def _prepare_indices(self):
         """
@@ -405,29 +431,6 @@ class MPIDataset(Dataset):
         shape = u.shape
         ps_3d = ps.unsqueeze(0).repeat(shape[0], 1, 1)
 
-        # Process emissions data if needed
-        emission_tensors = []
-        if self.include_emissions:
-            n_particles = len(self.settling_velocities)
-            for size_idx in range(n_particles):
-                # Get emission data
-                emission_raw = h5f[
-                    f"outputs/emissions/Plast0{size_idx+1}_SRF_EMIS_avrg"
-                ][time_idx]
-                emission_tensor = torch.from_numpy(emission_raw).to(torch.float32)
-
-                # Normalize if needed
-                if self.normalize:
-                    emission_tensor = (
-                        emission_tensor - self.emission_mean[size_idx]
-                    ) / self.emission_std[size_idx]
-
-                # Expand to 3D to match other inputs
-                emission_3d = emission_tensor.unsqueeze(0).repeat(shape[0], 1, 1)
-                emission_tensors.append(emission_3d)
-
-            emissions = torch.stack(emission_tensors)
-
         # Stack inputs
         input_tensors = [ps_3d, u, v, t, q]
         if self.include_troplev:
@@ -440,7 +443,7 @@ class MPIDataset(Dataset):
         # Add emissions to inputs if needed
         if self.include_emissions:
             # Concatenate along the first dimension (channels)
-            inputs = torch.cat([inputs, emissions], dim=0)
+            inputs = torch.cat([inputs, self.emissions], dim=0)
 
         # Process MMR data
         n_particles = len(self.settling_velocities)
