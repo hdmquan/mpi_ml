@@ -16,7 +16,7 @@ datamodule = MPIDataModule(batch_size=3, num_workers=4)
 # %% Model setup
 # model = FNOPINN(use_physics_loss=False)
 # model = CNNPINN(in_channels=11, output_altitude_dim=48 + 2, use_physics_loss=False)
-model = CNNPINNStream(output_altitude_dim=48 + 2, use_physics_loss=False)
+model = CNNPINNStream(output_altitude_dim=48 + 2, use_physics_loss=True)
 
 # %% Training configuration
 checkpoint_dir = PATH.CHECKPOINTS

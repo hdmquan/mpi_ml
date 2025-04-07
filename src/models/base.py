@@ -6,6 +6,7 @@ import torch.nn as nn
 from loguru import logger
 
 from src.utils import set_seed
+from src.data.module import get_normalization_stats
 
 set_seed()
 
@@ -20,6 +21,10 @@ class Base(pl.LightningModule, ABC):
         settling_velocities=None,
         include_coordinates=True,
         use_physics_loss=False,
+        use_mass_conservation_loss=False,
+        mass_conservation_weight=0.1,
+        learning_rate=1e-4,
+        weight_decay=1e-5,
         **kwargs,
     ):
         """
@@ -55,9 +60,9 @@ class Base(pl.LightningModule, ABC):
         pass
 
     def training_step(self, batch, batch_idx) -> torch.Tensor:
-        x, targets = batch
+        x, targets, metadata = batch
         predictions = self(x)
-        losses = self.compute_loss(x, predictions, targets)
+        losses = self.compute_loss(x, predictions, targets, metadata)
 
         # Log all loss components
         for name, value in losses.items():
@@ -66,9 +71,9 @@ class Base(pl.LightningModule, ABC):
         return losses["total"]
 
     def validation_step(self, batch, batch_idx) -> torch.Tensor:
-        x, y_true = batch
+        x, y_true, metadata = batch
         y_pred = self(x)
-        losses = self.compute_loss(x, y_pred, y_true)
+        losses = self.compute_loss(x, y_pred, y_true, metadata)
 
         # Log all loss components
         for name, value in losses.items():
@@ -77,9 +82,9 @@ class Base(pl.LightningModule, ABC):
         return losses["total"]
 
     def test_step(self, batch, batch_idx) -> torch.Tensor:
-        x, y_true = batch
+        x, y_true, metadata = batch
         y_pred = self(x)
-        losses = self.compute_loss(x, y_pred, y_true)
+        losses = self.compute_loss(x, y_pred, y_true, metadata)
         rmse = torch.sqrt(F.mse_loss(y_pred, y_true))
 
         # Log all loss components
@@ -109,13 +114,39 @@ class Base(pl.LightningModule, ABC):
             "monitor": "val_total",
         }
 
-    def compute_loss(self, x, mmr_pred, mmr_true, dt=1.0):
-        mse = self.compute_traditional_loss(mmr_pred, mmr_true)
+    def compute_loss(self, x, mmr_pred, mmr_true, metadata=None):
+        losses = {}
+        # Traditional MSE loss
+        mse_losses = self.compute_traditional_loss(mmr_pred, mmr_true)
+        losses.update(mse_losses)
+
+        # Physics-based loss if enabled
         if self.hparams.use_physics_loss:
-            L_transport = self.compute_transport_loss(x, mmr_pred)
-            return L_transport + mse["total"]
+            transport_loss = self.compute_transport_loss(x, mmr_pred)
+            losses["transport"] = transport_loss
+            losses["total"] = (
+                mse_losses["total"]
+                + self.hparams.transport_loss_weight * transport_loss
+            )
         else:
-            return mse["total"]
+            losses["total"] = mse_losses["total"]
+
+        # Mass conservation loss if enabled and metadata is provided
+        if self.hparams.use_mass_conservation_loss and metadata is not None:
+            try:
+                norm_stats = get_normalization_stats(self.trainer.datamodule.h5_file)
+                mass_losses = self.compute_mass_loss(
+                    x, mmr_pred, mmr_true, metadata, norm_stats
+                )
+                losses.update(mass_losses)
+                losses["total"] += (
+                    self.hparams.mass_conservation_weight
+                    * mass_losses["mass_conservation"]
+                )
+            except Exception as e:
+                logger.warning(f"Failed to compute mass conservation loss: {e}")
+
+        return losses
 
     def compute_traditional_loss(self, pred, true):
         # Shape [1, 6, 50, 384, 576]
@@ -154,7 +185,7 @@ class Base(pl.LightningModule, ABC):
         return {"total": total_loss, "mmr": mmr_loss, "deposition": deposition_loss}
 
     def compute_transport_loss(self, x, pred):
-
+        # Extract 3D MMR field (excluding deposition layers)
         mmr = pred[:, :, :-2, :, :]
 
         batch_size, n_particles, altitude, latitude, longitude = mmr.shape
@@ -179,17 +210,17 @@ class Base(pl.LightningModule, ABC):
         # Create coordinate grids
         z = torch.arange(altitude, device=device).float()
         y = torch.arange(latitude, device=device).float()
-        x = torch.arange(longitude, device=device).float()
+        x_grid = torch.arange(longitude, device=device).float()
 
         # Expand to match the shape of mmr
         z = z.view(1, 1, -1, 1, 1).expand_as(mmr)
         y = y.view(1, 1, 1, -1, 1).expand_as(mmr)
-        x = x.view(1, 1, 1, 1, -1).expand_as(mmr)
+        x_grid = x_grid.view(1, 1, 1, 1, -1).expand_as(mmr)
 
         # Make coordinates require gradients
         z.requires_grad_(True)
         y.requires_grad_(True)
-        x.requires_grad_(True)
+        x_grid.requires_grad_(True)
 
         # Compute gradients
         grad_Cz = torch.autograd.grad(
@@ -199,7 +230,7 @@ class Base(pl.LightningModule, ABC):
             mmr, y, grad_outputs=torch.ones_like(mmr), create_graph=True
         )[0]
         grad_Cx = torch.autograd.grad(
-            mmr, x, grad_outputs=torch.ones_like(mmr), create_graph=True
+            mmr, x_grid, grad_outputs=torch.ones_like(mmr), create_graph=True
         )[0]
 
         # Compute advection
@@ -213,7 +244,7 @@ class Base(pl.LightningModule, ABC):
 
         # Compute second derivatives for Laplacian
         laplacian_x = torch.autograd.grad(
-            grad_Cx, x, grad_outputs=torch.ones_like(grad_Cx), create_graph=True
+            grad_Cx, x_grid, grad_outputs=torch.ones_like(grad_Cx), create_graph=True
         )[0]
         laplacian_y = torch.autograd.grad(
             grad_Cy, y, grad_outputs=torch.ones_like(grad_Cy), create_graph=True
@@ -231,13 +262,118 @@ class Base(pl.LightningModule, ABC):
         # Transport loss
         return torch.mean(residual**2)
 
-    def compute_mass_loss(self, x, pred, true):
+    def compute_mass_loss(self, x, pred, true, metadata, norm_stats):
+        # Split prediction and target into components
+        pred_mmr = pred[:, :, :-2, :, :]  # [batch, n_particles, altitude, lat, lon]
+        true_mmr = true[:, :, :-2, :, :]
+        pred_dry_dep = pred[:, :, -2, :, :]  # [batch, n_particles, lat, lon]
+        true_dry_dep = true[:, :, -2, :, :]
+        pred_wet_dep = pred[:, :, -1, :, :]
+        true_wet_dep = true[:, :, -1, :, :]
+
+        # Denormalize MMR and deposition values efficiently
+        mmr_log_scale = norm_stats["mmr_log_scale"]
+        mmr_min, mmr_max = mmr_log_scale["min"], mmr_log_scale["max"]
+        epsilon = mmr_log_scale["epsilon"]
+
+        # Denormalize MMR (reverse the log-scale normalization)
+        # First unnormalize from [0,1] to log scale, then exp to get original values
+        pred_mmr_denorm = (
+            torch.pow(10, pred_mmr * (mmr_max - mmr_min) + mmr_min) - epsilon
+        )
+        true_mmr_denorm = (
+            torch.pow(10, true_mmr * (mmr_max - mmr_min) + mmr_min) - epsilon
+        )
+
+        # Clamp to avoid negative values after denormalization
+        pred_mmr_denorm = torch.clamp(pred_mmr_denorm, min=0.0)
+        true_mmr_denorm = torch.clamp(true_mmr_denorm, min=0.0)
+
+        # Denormalize depositions (simple linear denormalization)
+        # For each particle size
+        batch_size, n_particles = pred_mmr.shape[:2]
+
+        # Process all particle sizes at once using broadcasting
+        dry_dep_means = torch.tensor(
+            [norm_stats["output_mean"]["dry_dep"][i] for i in range(n_particles)],
+            device=pred_dry_dep.device,
+        ).view(1, n_particles, 1, 1)
+        dry_dep_stds = torch.tensor(
+            [norm_stats["output_std"]["dry_dep"][i] for i in range(n_particles)],
+            device=pred_dry_dep.device,
+        ).view(1, n_particles, 1, 1)
+
+        wet_dep_means = torch.tensor(
+            [norm_stats["output_mean"]["wet_dep"][i] for i in range(n_particles)],
+            device=pred_wet_dep.device,
+        ).view(1, n_particles, 1, 1)
+        wet_dep_stds = torch.tensor(
+            [norm_stats["output_std"]["wet_dep"][i] for i in range(n_particles)],
+            device=pred_wet_dep.device,
+        ).view(1, n_particles, 1, 1)
+
+        # Denormalize depositions
+        pred_dry_dep_denorm = pred_dry_dep * dry_dep_stds + dry_dep_means
+        true_dry_dep_denorm = true_dry_dep * dry_dep_stds + dry_dep_means
+        pred_wet_dep_denorm = pred_wet_dep * wet_dep_stds + wet_dep_means
+        true_wet_dep_denorm = true_wet_dep * wet_dep_stds + wet_dep_means
+
+        # Calculate total mass in the atmosphere using MMR and pressure levels
+        pred_atm_mass = self.calculate_mp_mass(
+            pred_mmr_denorm,
+            metadata["ps"],
+            metadata["hyai"],
+            metadata["hybi"],
+            metadata["gw"],
+            metadata["P0"],
+        )
+
+        true_atm_mass = self.calculate_mp_mass(
+            true_mmr_denorm,
+            metadata["ps"],
+            metadata["hyai"],
+            metadata["hybi"],
+            metadata["gw"],
+            metadata["P0"],
+        )
+
+        # Calculate deposition mass (integrate over surface area)
+        cell_area = metadata["gw"].view(1, 1, -1, 1)  # [1, 1, lat, 1]
+
+        # Sum over lat/lon dimensions with cell area weighting
+        pred_dry_dep_mass = (pred_dry_dep_denorm * cell_area).sum(dim=(-2, -1))
+        true_dry_dep_mass = (true_dry_dep_denorm * cell_area).sum(dim=(-2, -1))
+        pred_wet_dep_mass = (pred_wet_dep_denorm * cell_area).sum(dim=(-2, -1))
+        true_wet_dep_mass = (true_wet_dep_denorm * cell_area).sum(dim=(-2, -1))
+
+        # Total predicted and true mass
+        pred_total_mass = pred_atm_mass + pred_dry_dep_mass + pred_wet_dep_mass
+        true_total_mass = true_atm_mass + true_dry_dep_mass + true_wet_dep_mass
+
+        # Source mass from metadata
+        source_mass = metadata.get("emission_mass", metadata.get("source_mass", None))
+
         # Mass conservation loss
-        pass
+        if source_mass is not None:
+            mass_conservation_loss = F.mse_loss(pred_total_mass, source_mass)
+        else:
+            # If no source mass is provided, assume mass should be conserved from true values
+            mass_conservation_loss = F.mse_loss(pred_total_mass, true_total_mass)
+
+        # Mass distribution loss (comparing distribution between prediction and truth)
+        mass_distribution_loss = F.mse_loss(
+            pred_total_mass / (pred_total_mass.sum() + 1e-8),
+            true_total_mass / (true_total_mass.sum() + 1e-8),
+        )
+
+        return {
+            "mass_conservation": mass_conservation_loss,
+            "mass_distribution": mass_distribution_loss,
+        }
 
     @staticmethod
     def calculate_mp_mass(
-        mmr, ps, hyai, hybi, gw, p0, g=9.8
+        mmr, ps, hyai, hybi, gw, P0, g=9.8
     ):  # g = 9.80665 but c'mon I'm an engineer
         """
         Calculate the total mass of microplastic particles across all altitude levels.
@@ -248,7 +384,7 @@ class Base(pl.LightningModule, ABC):
             hyai: Hybrid A coefficient for interfaces
             hybi: Hybrid B coefficient for interfaces
             gw: Gaussian weights for latitude
-            p0: Reference pressure
+            P0: Reference pressure
             g: Gravitational acceleration (default: 9.8 m/s^2)
 
         Returns:
@@ -266,8 +402,8 @@ class Base(pl.LightningModule, ABC):
         if not isinstance(gw, torch.Tensor):
             gw = torch.tensor(gw, dtype=torch.float32, device=device)
 
-        if not isinstance(p0, torch.Tensor):
-            p0 = torch.tensor(p0, dtype=torch.float32, device=device)
+        if not isinstance(P0, torch.Tensor):
+            P0 = torch.tensor(P0, dtype=torch.float32, device=device)
 
         # (batch, 384, 576)
         ps = ps.unsqueeze(1).unsqueeze(1)  # [batch, 1, 1, 384, 576]
@@ -277,7 +413,7 @@ class Base(pl.LightningModule, ABC):
 
         # Pressure at interfaces
         # P_interface[k, i, j] = hyai[k] * P0 + hybi[k] * PS[i, j]
-        p_interface = hyai * p0 + hybi * ps  # [batch, 1, 49, 384, 576]
+        p_interface = hyai * P0 + hybi * ps  # [batch, 1, 49, 384, 576]
 
         # Pressure differences
         # deltaP[k, i, j] = P_interface[k+1, i, j] - P_interface[k, i, j]
@@ -364,9 +500,7 @@ if __name__ == "__main__":
         logger.info(f"{name}: {value.item():.6f}")
 
     mmr_pred_physics = model_with_physics(x)
-    losses_physics = model_with_physics.compute_physics_loss(
-        x, mmr_pred_physics, mmr_true
-    )
+    losses_physics = model_with_physics.compute_loss(x, mmr_pred_physics, mmr_true)
     logger.info("\nLosses with physics:")
     for name, value in losses_physics.items():
         logger.info(f"{name}: {value.item():.6f}")

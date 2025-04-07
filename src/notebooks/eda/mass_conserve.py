@@ -228,14 +228,14 @@ for size in acc_weight_df["particle_size"].unique():
         continue
 
     # Initial parameter guesses
-    p0 = [
+    P0 = [
         (np.max(weights) - np.min(weights)) / 2,  # amplitude
         0,  # phase
         np.mean(weights),  # vertical shift
     ]
 
     try:
-        params, _ = curve_fit(cosine_model, days, weights, p0=p0)
+        params, _ = curve_fit(cosine_model, days, weights, P0=P0)
         cosine_params[size] = {
             "amplitude": params[0],
             "phase": params[1],

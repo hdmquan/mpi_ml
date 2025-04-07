@@ -29,6 +29,7 @@ class MPIDataset(Dataset):
         only_mmr: bool = True,
         force_normalize: bool = False,
         include_emissions: bool = True,
+        include_metadata: bool = True,
     ):
         """
         Args:
@@ -54,60 +55,55 @@ class MPIDataset(Dataset):
         self.only_mmr = only_mmr
         self.force_normalize = force_normalize
         self.include_emissions = include_emissions
+        self.include_metadata = include_metadata
         self._prepare_indices()
-
         self._file_handle = None
 
         # Metadata
         with h5py.File(self.h5_file, "r") as h5f:
             self.lats = h5f["metadata/lat"][:]
             self.lons = h5f["metadata/lon"][:]
-
             self.settling_velocities = h5f["metadata/settling_velocity"][:]
 
-            self.P0 = h5f["metadata/P0"]
-            self.gw = h5f["metadata/gw"][:]
+            self.P0 = h5f["metadata/P0"][()]
+            self.gw = h5f["metadata/gw"][()]
+            self.hyai = h5f["metadata/hyai"][()]
+            self.hybi = h5f["metadata/hybi"][()]
 
-            self.hyam = h5f["metadata/hyam"][:]
-            self.hybm = h5f["metadata/hybm"][:]
+            R_earth = 6371000
 
-            self.hyai = h5f["metadata/hyai"][:]
-            self.hybi = h5f["metadata/hybi"][:]
-
-            # Earth radius
-            R = 6371000
-
-            self.cell_area = 2 * np.pi * R**2 * self.gw[:, np.newaxis]
-
-            n_particles = len(self.settling_velocities)
-
-            emission_tensors = []
-            raw_emission = []
-            for size_idx in range(n_particles):
-                # Since source emissions are constant, we only need to load the first
-                emission_raw = h5f[
-                    f"outputs/emissions/Plast0{size_idx+1}_SRF_EMIS_avrg"
-                ][0]
-                emission_tensor = torch.from_numpy(emission_raw).to(torch.float32)
-                raw_emission.append(emission_tensor)
-
-                if self.normalize:
-                    emission_tensor = (
-                        emission_tensor - self.emission_mean[size_idx]
-                    ) / self.emission_std[size_idx]
-
-                # Expand to 3D to match other inputs
-                emission_3d = emission_tensor.repeat(1, 1)
-                emission_tensors.append(emission_3d)
-
-            self.emissions = torch.stack(emission_tensors)
-            raw_emissions = torch.stack(raw_emission)
-
-            self.emission_mass = torch.sum(raw_emissions.sum(dim=1) * self.cell_area)
-
+            self.cell_area = 2 * np.pi * R_earth**2 * self.gw[:, np.newaxis]
             self._normalize(h5f, force_normalize=force_normalize)
 
-            del raw_emissions, emission_tensors, emission_raw, R, n_particles
+            raw_emission = []
+            emission_tensors = []
+            if self.include_emissions:
+                n_particles = len(self.settling_velocities)
+                for size_idx in range(n_particles):
+                    # Get emission data
+                    emission_raw = h5f[
+                        f"outputs/emissions/Plast0{size_idx+1}_SRF_EMIS_avrg"
+                    ][0]
+                    emission_tensor = torch.from_numpy(emission_raw).to(torch.float32)
+
+                    raw_emission.append(emission_raw)
+                    # Normalize if needed
+                    if self.normalize:
+                        emission_tensor = (
+                            emission_tensor - self.emission_mean[size_idx]
+                        ) / self.emission_std[size_idx]
+
+                    # TODO: Hardcoded for now
+                    emission_3d = emission_tensor.unsqueeze(0).repeat(48, 1, 1)
+                    emission_tensors.append(emission_3d)
+
+                self.emissions = torch.stack(emission_tensors)
+
+                raw_emission = np.stack(raw_emission)
+                emission_mass = raw_emission.sum(axis=0) * self.cell_area
+                self.emission_mass = torch.sum(
+                    torch.from_numpy(emission_mass).to(torch.float32)
+                )
 
     def _prepare_indices(self):
         """
@@ -528,8 +524,18 @@ class MPIDataset(Dataset):
         # Combine MMR and deposition data to create output with shape [6, 50, 384, 576]
         combined_output = torch.cat([mmr, dep], dim=1)  # shape: [6, 50, 384, 576]
 
-        # Always return the combined output, ignoring only_mmr flag
-        return inputs, combined_output
+        if not self.include_metadata:
+            return inputs, combined_output
+        else:
+            metadata = {
+                "P0": self.P0,
+                "gw": self.gw,
+                "hyai": self.hyai,
+                "hybi": self.hybi,
+                "settling_velocities": self.settling_velocities,
+                "emission_mass": self.emission_mass,
+            }
+            return inputs, combined_output, metadata
 
 
 class MPIDataModule(pl.LightningDataModule):
@@ -759,14 +765,32 @@ if __name__ == "__main__":
     print(len(train_dataloader))
 
     for batch in train_dataloader:
-        X, y = batch
+        X, y, metadata = batch
         print(X.shape)  # [1, 11, 48, 384, 576]
         print_tensor_memory(X)
         print(y.shape)  # [1, 6, 50, 384, 576]
         print_tensor_memory(y)
         print_memory_allocated()
 
-        # y = y[:, :, -1, :, :]
-        print(f"Y range: {y.min()} - {y.max()}")
+        print(f"PS range: {X[0, 0].min()} - {X[0, 0].max()}")
+        print(f"U range: {X[0, 1].min()} - {X[0, 1].max()}")
+        print(f"V range: {X[0, 2].min()} - {X[0, 2].max()}")
+        print(f"T range: {X[0, 3].min()} - {X[0, 3].max()}")
+        print(f"Q range: {X[0, 4].min()} - {X[0, 4].max()}")
+        print(f"Source range: {X[0, 5:11].min()} - {X[0, 5:11].max()}")
+
+        print(f"MMR range: {y[0, :, :48].min()} - {y[0, :, :48].max()}")
+        print(f"Dry deposition range: {y[0, :, 48].min()} - {y[0, :, 48].max()}")
+        print(f"Wet deposition range: {y[0, :, 49].min()} - {y[0, :, 49].max()}")
+
+        for key, value in metadata.items():
+            print(f"{key}: {value.shape}")
+
+        # P0: torch.Size([1])
+        # gw: torch.Size([1, 384])
+        # hyai: torch.Size([1, 49])
+        # hybi: torch.Size([1, 49])
+        # settling_velocities: torch.Size([1, 6])
+        # emission_mass: torch.Size([1])
 
         break
