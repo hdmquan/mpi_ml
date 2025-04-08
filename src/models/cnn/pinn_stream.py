@@ -27,7 +27,7 @@ class CNNPINNStream(Base):
         in_channels=11,
         mmr_out_channels=6,
         dep_out_channels=2,
-        hidden_channels=[64, 128, 128, 64],
+        hidden_channels=[64, 96, 64],
         mmr_hidden_channels=32,
         kernel_size=3,
         learning_rate=1e-3,

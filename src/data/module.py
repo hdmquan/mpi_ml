@@ -30,6 +30,8 @@ class MPIDataset(Dataset):
         force_normalize: bool = False,
         include_emissions: bool = True,
         include_metadata: bool = True,
+        longitude_split: int = 1,
+        latitude_split: int = 1,
     ):
         """
         Args:
@@ -41,6 +43,8 @@ class MPIDataset(Dataset):
             shuffle: Whether to shuffle the data indices (default: False)
             reverse_lev: Latitude originally descending (default: True)
             include_emissions: Whether to include surface emissions as inputs (default: True)
+            longitude_split: Number of splits along longitude dimension (default: 1, no splitting)
+            latitude_split: Number of splits along latitude dimension (default: 1, no splitting)
         """
         super().__init__()
 
@@ -56,6 +60,8 @@ class MPIDataset(Dataset):
         self.force_normalize = force_normalize
         self.include_emissions = include_emissions
         self.include_metadata = include_metadata
+        self.longitude_split = longitude_split
+        self.latitude_split = latitude_split
         self._prepare_indices()
         self._file_handle = None
 
@@ -384,13 +390,24 @@ class MPIDataset(Dataset):
             self._file_handle = None
 
     def __len__(self):
-        return self.num_samples
+        # Each temporal sample now creates longitude_split * latitude_split samples
+        return self.num_samples * self.longitude_split * self.latitude_split
 
     def __getitem__(self, idx):
-        time_idx = self.indices[idx]
+        # Convert idx to time_idx, lat_split_idx and lon_split_idx
+        total_splits = self.longitude_split * self.latitude_split
+        time_idx_pos = idx // total_splits
+        split_pos = idx % total_splits
+
+        # Calculate latitude and longitude split indices
+        lat_split_idx = split_pos // self.longitude_split
+        lon_split_idx = split_pos % self.longitude_split
+
+        time_idx = self.indices[time_idx_pos]
+
         h5f = self._open_file()
 
-        # Input fields processing is fine
+        # Input fields processing
         ps = h5f["inputs/PS"][time_idx]
         u = h5f["inputs/U"][time_idx]
         v = h5f["inputs/V"][time_idx]
@@ -524,6 +541,42 @@ class MPIDataset(Dataset):
         # Combine MMR and deposition data to create output with shape [6, 50, 384, 576]
         combined_output = torch.cat([mmr, dep], dim=1)  # shape: [6, 50, 384, 576]
 
+        # If we're using splits, apply them here
+        if self.longitude_split > 1 or self.latitude_split > 1:
+            # Get dimensions
+            lon_size = inputs.shape[-1]
+            lat_size = inputs.shape[-2]
+
+            # Calculate longitude split sizes
+            lon_split_size = lon_size // self.longitude_split
+            lon_start_idx = lon_split_idx * lon_split_size
+            lon_end_idx = (
+                (lon_split_idx + 1) * lon_split_size
+                if lon_split_idx < self.longitude_split - 1
+                else lon_size
+            )
+
+            # Calculate latitude split sizes
+            lat_split_size = lat_size // self.latitude_split
+            lat_start_idx = lat_split_idx * lat_split_size
+            lat_end_idx = (
+                (lat_split_idx + 1) * lat_split_size
+                if lat_split_idx < self.latitude_split - 1
+                else lat_size
+            )
+
+            # Slice the input and output tensors along both dimensions
+            inputs = inputs[..., lat_start_idx:lat_end_idx, lon_start_idx:lon_end_idx]
+            combined_output = combined_output[
+                ..., lat_start_idx:lat_end_idx, lon_start_idx:lon_end_idx
+            ]
+
+            # If metadata is included, also update lat/lon metadata
+            if self.include_metadata:
+                lons_split = self.lons[lon_start_idx:lon_end_idx]
+                lats_split = self.lats[lat_start_idx:lat_end_idx]
+
+        # Update the metadata dictionary
         if not self.include_metadata:
             return inputs, combined_output
         else:
@@ -535,6 +588,18 @@ class MPIDataset(Dataset):
                 "settling_velocities": self.settling_velocities,
                 "emission_mass": self.emission_mass,
             }
+
+            # Add split-specific coordinate info if needed
+            if self.longitude_split > 1:
+                metadata["lons"] = lons_split
+            else:
+                metadata["lons"] = self.lons
+
+            if self.latitude_split > 1:
+                metadata["lats"] = lats_split
+            else:
+                metadata["lats"] = self.lats
+
             return inputs, combined_output, metadata
 
 
@@ -549,6 +614,8 @@ class MPIDataModule(pl.LightningDataModule):
         normalize: bool = True,
         include_coordinates: bool = True,
         include_emissions: bool = True,
+        longitude_split: int = 1,
+        latitude_split: int = 1,
         **kwargs,
     ):
         super().__init__()
@@ -560,6 +627,8 @@ class MPIDataModule(pl.LightningDataModule):
         self.include_coordinates = include_coordinates
         self.shuffle = shuffle
         self.include_emissions = include_emissions
+        self.longitude_split = longitude_split
+        self.latitude_split = latitude_split
 
         self.h5_file = PATH.PROCESSED_DATA / "mpidata.h5"
 
@@ -575,41 +644,26 @@ class MPIDataModule(pl.LightningDataModule):
             )
 
     def setup(self, stage: Optional[str] = None):
+        # Update common args to include latitude_split
+        common_args = {
+            "h5_file": self.h5_file,
+            "split": self.split,
+            "normalize": self.normalize,
+            "include_coordinates": self.include_coordinates,
+            "shuffle": self.shuffle,
+            "force_normalize": False,
+            "include_emissions": self.include_emissions,
+            "longitude_split": self.longitude_split,
+            "latitude_split": self.latitude_split,
+        }
 
         if stage == "fit" or stage is None:
-            self.train_dataset = MPIDataset(
-                h5_file=self.h5_file,
-                mode="train",
-                split=self.split,
-                normalize=self.normalize,
-                include_coordinates=self.include_coordinates,
-                shuffle=self.shuffle,
-                force_normalize=False,
-                include_emissions=self.include_emissions,
-            )
+            self.train_dataset = MPIDataset(mode="train", **common_args)
 
-            self.val_dataset = MPIDataset(
-                h5_file=self.h5_file,
-                mode="val",
-                split=self.split,
-                normalize=self.normalize,
-                include_coordinates=self.include_coordinates,
-                shuffle=self.shuffle,
-                force_normalize=False,
-                include_emissions=self.include_emissions,
-            )
+            self.val_dataset = MPIDataset(mode="val", **common_args)
 
         if stage == "test" or stage is None:
-            self.test_dataset = MPIDataset(
-                h5_file=self.h5_file,
-                mode="test",
-                split=self.split,
-                normalize=self.normalize,
-                include_coordinates=self.include_coordinates,
-                shuffle=self.shuffle,
-                force_normalize=False,
-                include_emissions=self.include_emissions,
-            )
+            self.test_dataset = MPIDataset(mode="test", **common_args)
 
     def train_dataloader(self):
         return DataLoader(
@@ -755,7 +809,9 @@ if __name__ == "__main__":
 
     print_memory_allocated()
 
-    datamodule = MPIDataModule(shuffle=False)
+    datamodule = MPIDataModule(
+        longitude_split=6, latitude_split=6, shuffle=False, normalize=False
+    )
     datamodule.setup()
 
     print_memory_allocated()

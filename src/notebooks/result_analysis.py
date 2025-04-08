@@ -12,7 +12,9 @@ datamodule.setup()
 
 # %% Load best model
 # model = FNOPINN.load_from_checkpoint(PATH.CHECKPOINTS / "fno-best-model.ckpt")
-model = CNNPINNStream.load_from_checkpoint(PATH.CHECKPOINTS / "best-transport-cnn.ckpt")
+model = CNNPINNStream.load_from_checkpoint(
+    PATH.CHECKPOINTS / "best-model.ckpt", map_location=torch.device("cpu")
+)
 model.eval()
 
 
@@ -20,11 +22,14 @@ model.eval()
 batch = next(iter(datamodule.train_dataloader()))
 
 x, y, metadata = batch
-x = x.to(model.device)
-y = y.to(model.device)
+x = x.cpu()
+y = y.cpu()
 
 with torch.no_grad():
     y_pred = model(x)
+
+print(f"Prediction range: {y_pred.min().item()} to {y_pred.max().item()}")
+print(f"Ground truth range: {y.min().item()} to {y.max().item()}")
 
 # %% Visualization
 # Ground truth
