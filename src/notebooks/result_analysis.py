@@ -31,6 +31,7 @@ with torch.no_grad():
 print(f"Prediction range: {y_pred.min().item()} to {y_pred.max().item()}")
 print(f"Ground truth range: {y.min().item()} to {y.max().item()}")
 
+
 # %% Visualization
 # Ground truth
 plot_layer(y.cpu().detach(), 0, save=True, x_range=[0, 1])  # Level 1
