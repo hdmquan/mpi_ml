@@ -73,26 +73,26 @@ class Base(pl.LightningModule, ABC):
     def validation_step(self, batch, batch_idx) -> torch.Tensor:
         x, y_true, metadata = batch
         y_pred = self(x)
-        losses = self.compute_loss(x, y_pred, y_true, metadata)
+        loss = self.compute_traditional_loss(y_pred, y_true)
 
-        # Log all loss components
-        for name, value in losses.items():
-            self.log(f"val_{name}", value, prog_bar=name == "total")
+        self.log("val_total", loss["total"])
+        self.log("val_mmr", loss["mmr"])
+        self.log("val_deposition", loss["deposition"])
 
-        return losses["total"]
+        return loss["total"]
 
     def test_step(self, batch, batch_idx) -> torch.Tensor:
         x, y_true, metadata = batch
         y_pred = self(x)
-        losses = self.compute_loss(x, y_pred, y_true, metadata)
+        loss = self.compute_traditional_loss(y_pred, y_true)
         rmse = torch.sqrt(F.mse_loss(y_pred, y_true))
 
-        # Log all loss components
-        for name, value in losses.items():
-            self.log(f"test_{name}", value)
+        self.log("test_total", loss["total"])
+        self.log("test_mmr", loss["mmr"])
+        self.log("test_deposition", loss["deposition"])
         self.log("test_rmse", rmse)
 
-        return losses["total"]
+        return loss["total"]
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
