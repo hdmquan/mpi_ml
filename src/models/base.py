@@ -161,8 +161,6 @@ class Base(pl.LightningModule, ABC):
         dry_dep_true = true[:, :, -2, :, :]
         wet_dep_true = true[:, :, -1, :, :]
 
-        # print(pred.shape, true.shape)
-
         # Altitude weights
         # Decrease exponentially as altitude increases
         # From 2 at the surface to 1 at the top
@@ -172,7 +170,9 @@ class Base(pl.LightningModule, ABC):
         weights = weights.view(1, 1, -1, 1, 1)
 
         # Apply weights to squared differences
-        print(mmr_pred.shape, mmr_true.shape)
+        # logger.debug(
+        #     f"mmr_pred.shape: {mmr_pred.shape}, mmr_true.shape: {mmr_true.shape}"
+        # )
         mmr_squared_diff = (mmr_pred - mmr_true) ** 2
         mmr_weighted_squared_diff = mmr_squared_diff * weights
         mmr_loss = mmr_weighted_squared_diff.mean()
@@ -272,6 +272,7 @@ class Base(pl.LightningModule, ABC):
             advection = u * grad_Cx + v * grad_Cy
 
             # Settling
+            # logger.debug(f"v_s.shape: {v_s.shape}, grad_Cz.shape: {grad_Cz.shape}")
             settling = v_s * grad_Cz
 
             # Simplified diffusion term since we are calc loss not simulate
@@ -318,11 +319,10 @@ class Base(pl.LightningModule, ABC):
             return torch.mean(residual**2)
 
         except RuntimeError as e:
+            logger.error(f"Error in compute_transport_loss: {e}")
             import traceback
 
-            print(traceback.format_exc())
-            # Fallback to a simpler transport loss if we encounter gradient issues
-            print(f"Warning: Using simplified transport loss due to error: {e}")
+            logger.error(traceback.format_exc())
 
             # Simpler transport loss: just encourage gradients to align with wind directions
             # Extract gradients using finite differences (no autograd needed)
@@ -564,14 +564,11 @@ if __name__ == "__main__":
         use_physics_loss=True,
     )
 
-    dep_rand = torch.randn(1, 6, 2, 384, 576)
+    pred_dep = torch.randn(1, 6, 2, 384, 576)
 
     # Test forward pass
     mmr_pred_no_physics = model_no_physics(x)
-    mmr_pred_no_physics = torch.cat([mmr_pred_no_physics, dep_rand], dim=2)
-
-    print(mmr_pred_no_physics.shape)
-
+    mmr_pred_no_physics = torch.cat([mmr_pred_no_physics, pred_dep], dim=2)
     logger.info(f"Input shape: {x.shape}")
     logger.info(f"Output shape: {mmr_pred_no_physics.shape}")
     logger.info(f"Target shape: {mmr_true.shape}")
@@ -583,8 +580,7 @@ if __name__ == "__main__":
         logger.info(f"{name}: {value.item():.6f}")
 
     mmr_pred_physics = model_with_physics(x)
-    mmr_pred_physics = torch.cat([mmr_pred_physics, dep_rand], dim=2)
-
+    mmr_pred_physics = torch.cat([mmr_pred_physics, pred_dep], dim=2)
     losses_physics = model_with_physics.compute_loss(x, mmr_pred_physics, mmr_true)
     logger.info("\nLosses with physics:")
     for name, value in losses_physics.items():

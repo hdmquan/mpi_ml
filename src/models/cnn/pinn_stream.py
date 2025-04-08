@@ -35,7 +35,6 @@ class CNNPINNStream(Base):
         conservation_weight=0.1,
         physics_weight=0.1,
         settling_velocities=None,
-        output_altitude_dim=None,
         **kwargs,
     ):
         super().__init__(
@@ -74,16 +73,8 @@ class CNNPINNStream(Base):
         # MMR prediction
         mmr = torch.sigmoid(self.mmr_head(features))
 
-        if (
-            self.hparams.output_altitude_dim is not None
-            and self.hparams.output_altitude_dim != mmr.shape[2]
-        ):
-            mmr = F.interpolate(
-                mmr,
-                size=(self.hparams.output_altitude_dim, mmr.shape[3], mmr.shape[4]),
-                mode="trilinear",
-                align_corners=False,
-            )
+        # Preserve the original altitude dimension (48)
+        # We'll remove the interpolation code that changes it to output_altitude_dim (50)
 
         # Collapse 3D features to 2D (e.g., mean over altitude)
         pooled = features.mean(dim=2)  # [B, C, H, W]
@@ -93,57 +84,62 @@ class CNNPINNStream(Base):
         dep_hidden = F.relu(self.dep_conv1(dep_input))
         deposition = torch.sigmoid(self.dep_conv2(dep_hidden))  # [B, 2, H, W]
 
-        # Convert 2D deposition to 3D by expanding altitude dimension
-        # Shape will be [B, 2, 1, H, W]
-        deposition_3d = deposition.unsqueeze(2)
+        # logger.debug(f"MMR shape: {mmr.shape}")
+        # logger.debug(f"Deposition shape: {deposition.shape}")
 
-        # Expand deposition to match mmr's altitude dimension
-        # Shape will be [B, 2, altitude, H, W]
-        if self.hparams.output_altitude_dim is not None:
-            alt_dim = self.hparams.output_altitude_dim
-        else:
-            alt_dim = mmr.shape[2]
+        # Get altitude dimension directly from mmr (which should be the same as input.shape[2])
+        alt_dim = mmr.shape[2]  # This should be 48
 
-        deposition_expanded = deposition_3d.expand(-1, -1, alt_dim, -1, -1)
+        # Create output tensor with shape [B, 6, altitude+2, H, W]
+        batch_size, _, _, height, width = mmr.shape
+        output = torch.zeros(
+            batch_size, 6, alt_dim + 2, height, width, device=mmr.device
+        )
 
-        # For altitude layers beyond the surface layer, set deposition values to zero
-        # Only the bottom-most layer will have non-zero values
-        bottom_mask = torch.zeros_like(deposition_expanded)
-        bottom_mask[:, :, 0, :, :] = 1.0  # Only the first altitude layer has deposition
-        deposition_expanded = deposition_expanded * bottom_mask
+        # Copy mmr data to the altitude layers
+        output[:, :, :alt_dim, :, :] = mmr
 
-        # Concatenate along the channel dimension
-        # Shape will be [B, mmr_out_channels + dep_out_channels, altitude, H, W]
-        predictions = torch.cat([mmr, deposition_expanded], dim=1)
+        # Add deposition data to the last two layers
+        # First deposition channel goes to altitude+0
+        output[:, :, alt_dim, :, :] = (
+            deposition[:, 0, :, :].unsqueeze(1).expand(-1, 6, -1, -1)
+        )
+        # Second deposition channel goes to altitude+1
+        output[:, :, alt_dim + 1, :, :] = (
+            deposition[:, 1, :, :].unsqueeze(1).expand(-1, 6, -1, -1)
+        )
 
-        return predictions
+        return output
 
 
 if __name__ == "__main__":
     import time
+    from loguru import logger
     from src.utils import count_parameters
 
-    model = CNNPINNStream(output_altitude_dim=50, use_physics_loss=True)
-    print(f"Number of parameters: {count_parameters(model)}")
+    # Remove the output_altitude_dim parameter to use the original altitude dimension
+    model = CNNPINNStream(use_physics_loss=True)
+    logger.info(f"Number of parameters: {count_parameters(model)}")
 
     x = torch.randn(1, 11, 48, 384, 576)
     start_time = time.time()
     predictions = model(x)
-    print(f"Forward pass time: {time.time() - start_time:.3f} seconds")
-    print(f"Predictions shape: {predictions.shape}")
+    logger.info(f"Forward pass time: {time.time() - start_time:.3f} seconds")
+    logger.debug(f"Predictions shape: {predictions.shape}")
 
-    # The combined output tensor shape should be [B, mmr_out_channels + dep_out_channels, altitude, H, W]
-    # In this case: [1, 8, 50, 384, 576] = [1, 6+2, 50, 384, 576]
+    # The output tensor shape should be [B, 6, altitude+2, H, W]
+    # In this case: [1, 6, 50, 384, 576] = [1, 6, 48+2, 384, 576]
 
     # Create a mock ground truth tensor for testing the loss
     # It needs to match the output shape of the model
-    y = torch.randn(1, 8, 50, 384, 576)  # 6 MMR channels + 2 deposition channels
+    y = torch.randn(
+        1, 6, 50, 384, 576
+    )  # 6 MMR channels, 48 altitude layers + 2 deposition layers
 
     # Test loss computation
-    predictions = model(x)
     losses = model.compute_loss(x, predictions, y)
-    print("Loss computation successful")
+    logger.info("Loss computation successful")
 
     start_time = time.time()
     losses["total"].backward()
-    print(f"Backward pass time: {time.time() - start_time:.3f} seconds")
+    logger.info(f"Backward pass time: {time.time() - start_time:.3f} seconds")
