@@ -4,7 +4,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
 from src.models.fno import FNOPINN
 from src.models.cnn import CNNPINN, CNNPINNStream
-from src.data.module imgport MPIDataModule
+from src.data.module import MPIDataModule
 from src.utils.plotting import plot_layer, plot_long_cut
 from src.utils import set_seed, PATH
 
@@ -16,7 +16,7 @@ datamodule = MPIDataModule(batch_size=3, num_workers=4)
 # %% Model setup
 # model = FNOPINN(use_physics_loss=False)
 # model = CNNPINN(in_channels=11, output_altitude_dim=48 + 2, use_physics_loss=False)
-model = CNNPINNStream(output_altitude_dim=48 + 2, use_physics_loss=True)
+model = CNNPINNStream(use_physics_loss=False)
 
 # %% Training configuration
 checkpoint_dir = PATH.CHECKPOINTS

@@ -434,7 +434,6 @@ class Base(pl.LightningModule, ABC):
         if source_mass is not None:
             mass_conservation_loss = F.mse_loss(pred_total_mass, source_mass)
         else:
-            # If no source mass is provided, assume mass should be conserved from true values
             mass_conservation_loss = F.mse_loss(pred_total_mass, true_total_mass)
 
         # Mass distribution loss (comparing distribution between prediction and truth)
