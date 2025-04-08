@@ -1,4 +1,5 @@
 # %% Imports
+from random import betavariate
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -11,12 +12,12 @@ from src.utils import set_seed, PATH
 set_seed()
 
 # %% Data
-datamodule = MPIDataModule(batch_size=2, num_workers=4)
+datamodule = MPIDataModule(batch_size=1, num_workers=4)
 
 # %% Model setup
 # model = FNOPINN(use_physics_loss=False)
 # model = CNNPINN(in_channels=11, output_altitude_dim=48 + 2, use_physics_loss=False)
-model = CNNPINNStream(use_physics_loss=True)
+model = CNNPINNStream(use_physics_loss=False)
 
 # %% Training configuration
 checkpoint_dir = PATH.CHECKPOINTS
@@ -57,7 +58,11 @@ test_results = trainer.test(model, datamodule=datamodule)
 
 # %% Visualization
 batch = next(iter(datamodule.test_dataloader()))
-x, y = [b.to(model.device) for b in batch]
+
+x, y, metadata = batch
+x = x.to(model.device)
+y = y.to(model.device)
+
 y_pred = model(x)
 
 # Ground truth

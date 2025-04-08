@@ -27,7 +27,8 @@ class CNNPINNStream(Base):
         in_channels=11,
         mmr_out_channels=6,
         dep_out_channels=2,
-        hidden_channels=[8, 16, 8],
+        hidden_channels=[64, 128, 128, 64],
+        mmr_hidden_channels=32,
         kernel_size=3,
         learning_rate=1e-3,
         weight_decay=1e-5,
@@ -63,9 +64,14 @@ class CNNPINNStream(Base):
 
         # Deposition Head (2D CNNs)
         self.dep_conv1 = nn.Conv2d(
-            hidden_channels[-1] + mmr_out_channels, 16, kernel_size=3, padding=1
+            hidden_channels[-1] + mmr_out_channels,
+            mmr_hidden_channels,
+            kernel_size=3,
+            padding=1,
         )
-        self.dep_conv2 = nn.Conv2d(16, dep_out_channels, kernel_size=3, padding=1)
+        self.dep_conv2 = nn.Conv2d(
+            mmr_hidden_channels, dep_out_channels, kernel_size=3, padding=1
+        )
 
     def forward(self, x, coords=None):
         features = self.encoder(x)
@@ -121,8 +127,13 @@ if __name__ == "__main__":
     model = CNNPINNStream(use_physics_loss=True)
     logger.info(f"Number of parameters: {count_parameters(model)}")
 
-    x = torch.randn(1, 11, 48, 384, 576)
+    alt = 48
+    lat = 384
+    lon = 576 // 2
+
+    x = torch.randn(1, 11, alt, lat, lon)
     start_time = time.time()
+
     predictions = model(x)
     logger.info(f"Forward pass time: {time.time() - start_time:.3f} seconds")
     logger.debug(f"Predictions shape: {predictions.shape}")
@@ -132,9 +143,7 @@ if __name__ == "__main__":
 
     # Create a mock ground truth tensor for testing the loss
     # It needs to match the output shape of the model
-    y = torch.randn(
-        1, 6, 50, 384, 576
-    )  # 6 MMR channels, 48 altitude layers + 2 deposition layers
+    y = torch.randn(1, 6, alt + 2, lat, lon)
 
     # Test loss computation
     losses = model.compute_loss(x, predictions, y)

@@ -62,13 +62,41 @@ class Base(pl.LightningModule, ABC):
     def training_step(self, batch, batch_idx) -> torch.Tensor:
         x, targets, metadata = batch
         predictions = self(x)
-        losses = self.compute_loss(x, predictions, targets, metadata)
 
-        # Log all loss components
-        for name, value in losses.items():
-            self.log(f"train_{name}", value, prog_bar=name == "total")
+        _, _, _, lat, lon = predictions.shape
+        mid = lat // 2
 
-        return losses["total"]
+        preds_half1 = predictions[:, :, :, :mid, :]
+        preds_half2 = predictions[:, :, :, mid:, :]
+
+        targets_half1 = targets[:, :, :, :mid, :]
+        targets_half2 = targets[:, :, :, mid:, :]
+
+        # First half backward
+        losses1 = self.compute_loss(x, preds_half1, targets_half1, metadata)
+        loss1 = losses1["total"]
+        loss1.backward()
+
+        # Second half backward
+        losses2 = self.compute_loss(x, preds_half2, targets_half2, metadata)
+        loss2 = losses2["total"]
+        loss2.backward()
+
+        # Combine total loss
+        total_loss = loss1 + loss2
+
+        # Log summed components
+        for name in losses1:
+            if name in losses2:
+                self.log(
+                    f"train_{name}",
+                    losses1[name] + losses2[name],
+                    prog_bar=(name == "total"),
+                )
+            else:
+                self.log(f"train_{name}", losses1[name], prog_bar=(name == "total"))
+
+        return total_loss
 
     def validation_step(self, batch, batch_idx) -> torch.Tensor:
         x, y_true, metadata = batch
