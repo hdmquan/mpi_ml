@@ -75,7 +75,7 @@ class Base(pl.LightningModule, ABC):
         y_pred = self(x)
         loss = self.compute_traditional_loss(y_pred, y_true)
 
-        self.log("val_total", loss["total"], prog_bar=True, sync_dist=True)
+        self.log("val_total", loss["total"], prog_bar=True)
         self.log("val_mmr", loss["mmr"])
         self.log("val_deposition", loss["deposition"])
 
