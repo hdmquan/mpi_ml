@@ -13,7 +13,7 @@ datamodule.setup()
 # %% Load best model
 # model = FNOPINN.load_from_checkpoint(PATH.CHECKPOINTS / "fno-best-model.ckpt")
 model = CNNPINNStream.load_from_checkpoint(
-    PATH.CHECKPOINTS / "best-model.ckpt", map_location=torch.device("cpu")
+    PATH.CHECKPOINTS / "best-model-32_64_32-128_transport.ckpt", map_location=torch.device("cpu")
 )
 model.eval()
 

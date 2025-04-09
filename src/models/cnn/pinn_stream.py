@@ -27,21 +27,15 @@ class CNNPINNStream(Base):
         in_channels=11,
         mmr_out_channels=6,
         dep_out_channels=2,
-        hidden_channels=[64, 96, 64],
-        mmr_hidden_channels=32,
+        hidden_channels=[32, 64, 32],
+        mmr_hidden_channels=128,
         kernel_size=3,
         learning_rate=1e-3,
         weight_decay=1e-5,
-        mmr_weight=1.0,
-        conservation_weight=0.1,
-        physics_weight=0.1,
         settling_velocities=None,
         **kwargs,
     ):
         super().__init__(
-            mmr_weight=mmr_weight,
-            conservation_weight=conservation_weight,
-            physics_weight=physics_weight,
             settling_velocities=settling_velocities,
             **kwargs,
         )
