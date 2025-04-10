@@ -53,7 +53,7 @@ torch.cuda.empty_cache()
 
 # %% Load and process second model
 model2 = CNNPINNStream.load_from_checkpoint(
-    PATH.CHECKPOINTS / "best-model-32_64_32-128_transport.ckpt",
+    PATH.CHECKPOINTS / "best-model-32_64_32-128.ckpt",
     map_location=torch.device("cpu"),
 )
 model2.eval()
