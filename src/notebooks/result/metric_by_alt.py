@@ -98,12 +98,32 @@ axes = axes.flatten()
 
 for i in range(6):
     ax = axes[i]
-    ax.plot(rmse_model1[i], label="Model 1", color="blue")
-    ax.plot(rmse_model2[i], label="Model 2", color="red")
+    # Plot model 1
+    ax.plot(rmse_model1[i], color="blue", label="Model 1" if i == 0 else None)
+    # Plot model 2
+    ax.plot(rmse_model2[i], color="red", label="Model 2" if i == 0 else None)
+
+    # Add min-max range with alpha
+    ax.fill_between(
+        range(len(rmse_model1[i])),
+        rmse_model1[i].min(),
+        rmse_model1[i].max(),
+        color="blue",
+        alpha=0.1,
+    )
+    ax.fill_between(
+        range(len(rmse_model2[i])),
+        rmse_model2[i].min(),
+        rmse_model2[i].max(),
+        color="red",
+        alpha=0.1,
+    )
+
     ax.set_title(f"Instance {i+1}")
     ax.set_xlabel("Altitude Level")
     ax.set_ylabel("RMSE")
-    ax.legend()
+    if i == 0:  # Only show legend for the first subplot
+        ax.legend()
     ax.grid(True)
 
 plt.tight_layout()
@@ -115,12 +135,32 @@ axes = axes.flatten()
 
 for i in range(6):
     ax = axes[i]
-    ax.plot(r2_model1[i], label="Model 1", color="blue")
-    ax.plot(r2_model2[i], label="Model 2", color="red")
+    # Plot model 1
+    ax.plot(r2_model1[i], color="blue", label="Model 1" if i == 0 else None)
+    # Plot model 2
+    ax.plot(r2_model2[i], color="red", label="Model 2" if i == 0 else None)
+
+    # Add min-max range with alpha
+    ax.fill_between(
+        range(len(r2_model1[i])),
+        r2_model1[i].min(),
+        r2_model1[i].max(),
+        color="blue",
+        alpha=0.1,
+    )
+    ax.fill_between(
+        range(len(r2_model2[i])),
+        r2_model2[i].min(),
+        r2_model2[i].max(),
+        color="red",
+        alpha=0.1,
+    )
+
     ax.set_title(f"Instance {i+1}")
     ax.set_xlabel("Altitude Level")
     ax.set_ylabel("R²")
-    ax.legend()
+    if i == 0:  # Only show legend for the first subplot
+        ax.legend()
     ax.grid(True)
 
 plt.tight_layout()
