@@ -102,33 +102,22 @@ for i in range(6):
     row = (i // 3) + 1
     col = (i % 3) + 1
 
-    # Add Model 1 traces
-    fig_rmse.add_trace(
-        go.Scatter(
-            x=list(range(len(rmse_model1[i]))),
-            y=rmse_model1[i],
-            mode="lines",
-            name="Model 1" if i == 0 else None,
-            line=dict(color="blue"),
-            showlegend=i == 0,
-        ),
-        row=row,
-        col=col,
-    )
+    x = list(range(len(rmse_model1[i])))
+    x_rev = x[::-1]
 
-    # Add Model 1 min-max fill
+    # Add Model 1 filled area
     fig_rmse.add_trace(
         go.Scatter(
-            x=list(range(len(rmse_model1[i]))) + list(range(len(rmse_model1[i])))[::-1],
+            x=x + x_rev,
             y=np.concatenate(
                 [
-                    rmse_model1[i].min() * np.ones_like(rmse_model1[i]),
-                    rmse_model1[i].max() * np.ones_like(rmse_model1[i])[::-1],
+                    rmse_model1[i].max() * np.ones_like(rmse_model1[i]),
+                    rmse_model1[i].min() * np.ones_like(rmse_model1[i])[::-1],
                 ]
             ),
             fill="toself",
-            fillcolor="rgba(0, 0, 255, 0.1)",
-            line=dict(color="rgba(255, 255, 255, 0)"),
+            fillcolor="rgba(0, 0, 255, 0.2)",
+            line_color="rgba(255, 255, 255, 0)",
             name="Model 1 Range" if i == 0 else None,
             showlegend=i == 0,
         ),
@@ -136,33 +125,19 @@ for i in range(6):
         col=col,
     )
 
-    # Add Model 2 traces
+    # Add Model 2 filled area
     fig_rmse.add_trace(
         go.Scatter(
-            x=list(range(len(rmse_model2[i]))),
-            y=rmse_model2[i],
-            mode="lines",
-            name="Model 2" if i == 0 else None,
-            line=dict(color="red"),
-            showlegend=i == 0,
-        ),
-        row=row,
-        col=col,
-    )
-
-    # Add Model 2 min-max fill
-    fig_rmse.add_trace(
-        go.Scatter(
-            x=list(range(len(rmse_model2[i]))) + list(range(len(rmse_model2[i])))[::-1],
+            x=x + x_rev,
             y=np.concatenate(
                 [
-                    rmse_model2[i].min() * np.ones_like(rmse_model2[i]),
-                    rmse_model2[i].max() * np.ones_like(rmse_model2[i])[::-1],
+                    rmse_model2[i].max() * np.ones_like(rmse_model2[i]),
+                    rmse_model2[i].min() * np.ones_like(rmse_model2[i])[::-1],
                 ]
             ),
             fill="toself",
-            fillcolor="rgba(255, 0, 0, 0.1)",
-            line=dict(color="rgba(255, 255, 255, 0)"),
+            fillcolor="rgba(255, 0, 0, 0.2)",
+            line_color="rgba(255, 255, 255, 0)",
             name="Model 2 Range" if i == 0 else None,
             showlegend=i == 0,
         ),
@@ -170,6 +145,33 @@ for i in range(6):
         col=col,
     )
 
+    # Add Model 1 line
+    fig_rmse.add_trace(
+        go.Scatter(
+            x=x,
+            y=rmse_model1[i],
+            line_color="rgb(0, 0, 255)",
+            name="Model 1" if i == 0 else None,
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
+
+    # Add Model 2 line
+    fig_rmse.add_trace(
+        go.Scatter(
+            x=x,
+            y=rmse_model2[i],
+            line_color="rgb(255, 0, 0)",
+            name="Model 2" if i == 0 else None,
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
+
+fig_rmse.update_traces(mode="lines")
 fig_rmse.update_layout(
     title="RMSE by Altitude Level", height=800, width=1200, showlegend=True
 )
@@ -192,33 +194,22 @@ for i in range(6):
     row = (i // 3) + 1
     col = (i % 3) + 1
 
-    # Add Model 1 traces
-    fig_r2.add_trace(
-        go.Scatter(
-            x=list(range(len(r2_model1[i]))),
-            y=r2_model1[i],
-            mode="lines",
-            name="Model 1" if i == 0 else None,
-            line=dict(color="blue"),
-            showlegend=i == 0,
-        ),
-        row=row,
-        col=col,
-    )
+    x = list(range(len(r2_model1[i])))
+    x_rev = x[::-1]
 
-    # Add Model 1 min-max fill
+    # Add Model 1 filled area
     fig_r2.add_trace(
         go.Scatter(
-            x=list(range(len(r2_model1[i]))) + list(range(len(r2_model1[i])))[::-1],
+            x=x + x_rev,
             y=np.concatenate(
                 [
-                    r2_model1[i].min() * np.ones_like(r2_model1[i]),
-                    r2_model1[i].max() * np.ones_like(r2_model1[i])[::-1],
+                    r2_model1[i].max() * np.ones_like(r2_model1[i]),
+                    r2_model1[i].min() * np.ones_like(r2_model1[i])[::-1],
                 ]
             ),
             fill="toself",
-            fillcolor="rgba(0, 0, 255, 0.1)",
-            line=dict(color="rgba(255, 255, 255, 0)"),
+            fillcolor="rgba(0, 0, 255, 0.2)",
+            line_color="rgba(255, 255, 255, 0)",
             name="Model 1 Range" if i == 0 else None,
             showlegend=i == 0,
         ),
@@ -226,33 +217,19 @@ for i in range(6):
         col=col,
     )
 
-    # Add Model 2 traces
+    # Add Model 2 filled area
     fig_r2.add_trace(
         go.Scatter(
-            x=list(range(len(r2_model2[i]))),
-            y=r2_model2[i],
-            mode="lines",
-            name="Model 2" if i == 0 else None,
-            line=dict(color="red"),
-            showlegend=i == 0,
-        ),
-        row=row,
-        col=col,
-    )
-
-    # Add Model 2 min-max fill
-    fig_r2.add_trace(
-        go.Scatter(
-            x=list(range(len(r2_model2[i]))) + list(range(len(r2_model2[i])))[::-1],
+            x=x + x_rev,
             y=np.concatenate(
                 [
-                    r2_model2[i].min() * np.ones_like(r2_model2[i]),
-                    r2_model2[i].max() * np.ones_like(r2_model2[i])[::-1],
+                    r2_model2[i].max() * np.ones_like(r2_model2[i]),
+                    r2_model2[i].min() * np.ones_like(r2_model2[i])[::-1],
                 ]
             ),
             fill="toself",
-            fillcolor="rgba(255, 0, 0, 0.1)",
-            line=dict(color="rgba(255, 255, 255, 0)"),
+            fillcolor="rgba(255, 0, 0, 0.2)",
+            line_color="rgba(255, 255, 255, 0)",
             name="Model 2 Range" if i == 0 else None,
             showlegend=i == 0,
         ),
@@ -260,6 +237,33 @@ for i in range(6):
         col=col,
     )
 
+    # Add Model 1 line
+    fig_r2.add_trace(
+        go.Scatter(
+            x=x,
+            y=r2_model1[i],
+            line_color="rgb(0, 0, 255)",
+            name="Model 1" if i == 0 else None,
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
+
+    # Add Model 2 line
+    fig_r2.add_trace(
+        go.Scatter(
+            x=x,
+            y=r2_model2[i],
+            line_color="rgb(255, 0, 0)",
+            name="Model 2" if i == 0 else None,
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
+
+fig_r2.update_traces(mode="lines")
 fig_r2.update_layout(
     title="R² by Altitude Level", height=800, width=1200, showlegend=True
 )
