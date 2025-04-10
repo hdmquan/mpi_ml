@@ -1,7 +1,8 @@
 # %% Imports
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from src.models.cnn import CNNPINNStream
 from src.data.module import MPIDataModule
 from src.utils import PATH
@@ -92,79 +93,185 @@ r2_model2 = np.array(all_r2_2)
 del model2
 torch.cuda.empty_cache()
 
-# %% Plot RMSE
-fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-axes = axes.flatten()
+# %% Create RMSE plot
+fig_rmse = make_subplots(
+    rows=2, cols=3, subplot_titles=[f"Instance {i+1}" for i in range(6)]
+)
 
 for i in range(6):
-    ax = axes[i]
-    # Plot model 1
-    ax.plot(rmse_model1[i], color="blue", label="Model 1" if i == 0 else None)
-    # Plot model 2
-    ax.plot(rmse_model2[i], color="red", label="Model 2" if i == 0 else None)
+    row = (i // 3) + 1
+    col = (i % 3) + 1
 
-    # Add min-max range with alpha
-    ax.fill_between(
-        range(len(rmse_model1[i])),
-        rmse_model1[i].min(),
-        rmse_model1[i].max(),
-        color="blue",
-        alpha=0.1,
-    )
-    ax.fill_between(
-        range(len(rmse_model2[i])),
-        rmse_model2[i].min(),
-        rmse_model2[i].max(),
-        color="red",
-        alpha=0.1,
+    # Add Model 1 traces
+    fig_rmse.add_trace(
+        go.Scatter(
+            x=list(range(len(rmse_model1[i]))),
+            y=rmse_model1[i],
+            mode="lines",
+            name="Model 1" if i == 0 else None,
+            line=dict(color="blue"),
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
     )
 
-    ax.set_title(f"Instance {i+1}")
-    ax.set_xlabel("Altitude Level")
-    ax.set_ylabel("RMSE")
-    if i == 0:  # Only show legend for the first subplot
-        ax.legend()
-    ax.grid(True)
+    # Add Model 1 min-max fill
+    fig_rmse.add_trace(
+        go.Scatter(
+            x=list(range(len(rmse_model1[i]))) + list(range(len(rmse_model1[i])))[::-1],
+            y=np.concatenate(
+                [
+                    rmse_model1[i].min() * np.ones_like(rmse_model1[i]),
+                    rmse_model1[i].max() * np.ones_like(rmse_model1[i])[::-1],
+                ]
+            ),
+            fill="toself",
+            fillcolor="rgba(0, 0, 255, 0.1)",
+            line=dict(color="rgba(255, 255, 255, 0)"),
+            name="Model 1 Range" if i == 0 else None,
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
 
-plt.tight_layout()
-plt.show()
+    # Add Model 2 traces
+    fig_rmse.add_trace(
+        go.Scatter(
+            x=list(range(len(rmse_model2[i]))),
+            y=rmse_model2[i],
+            mode="lines",
+            name="Model 2" if i == 0 else None,
+            line=dict(color="red"),
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
 
-# %% Plot R²
-fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-axes = axes.flatten()
+    # Add Model 2 min-max fill
+    fig_rmse.add_trace(
+        go.Scatter(
+            x=list(range(len(rmse_model2[i]))) + list(range(len(rmse_model2[i])))[::-1],
+            y=np.concatenate(
+                [
+                    rmse_model2[i].min() * np.ones_like(rmse_model2[i]),
+                    rmse_model2[i].max() * np.ones_like(rmse_model2[i])[::-1],
+                ]
+            ),
+            fill="toself",
+            fillcolor="rgba(255, 0, 0, 0.1)",
+            line=dict(color="rgba(255, 255, 255, 0)"),
+            name="Model 2 Range" if i == 0 else None,
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
+
+fig_rmse.update_layout(
+    title="RMSE by Altitude Level", height=800, width=1200, showlegend=True
+)
+
+# Update x and y axis labels
+for i in range(1, 7):
+    fig_rmse.update_xaxes(
+        title_text="Altitude Level", row=(i - 1) // 3 + 1, col=(i - 1) % 3 + 1
+    )
+    fig_rmse.update_yaxes(title_text="RMSE", row=(i - 1) // 3 + 1, col=(i - 1) % 3 + 1)
+
+fig_rmse.show()
+
+# %% Create R² plot
+fig_r2 = make_subplots(
+    rows=2, cols=3, subplot_titles=[f"Instance {i+1}" for i in range(6)]
+)
 
 for i in range(6):
-    ax = axes[i]
-    # Plot model 1
-    ax.plot(r2_model1[i], color="blue", label="Model 1" if i == 0 else None)
-    # Plot model 2
-    ax.plot(r2_model2[i], color="red", label="Model 2" if i == 0 else None)
+    row = (i // 3) + 1
+    col = (i % 3) + 1
 
-    # Add min-max range with alpha
-    ax.fill_between(
-        range(len(r2_model1[i])),
-        r2_model1[i].min(),
-        r2_model1[i].max(),
-        color="blue",
-        alpha=0.1,
-    )
-    ax.fill_between(
-        range(len(r2_model2[i])),
-        r2_model2[i].min(),
-        r2_model2[i].max(),
-        color="red",
-        alpha=0.1,
+    # Add Model 1 traces
+    fig_r2.add_trace(
+        go.Scatter(
+            x=list(range(len(r2_model1[i]))),
+            y=r2_model1[i],
+            mode="lines",
+            name="Model 1" if i == 0 else None,
+            line=dict(color="blue"),
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
     )
 
-    ax.set_title(f"Instance {i+1}")
-    ax.set_xlabel("Altitude Level")
-    ax.set_ylabel("R²")
-    if i == 0:  # Only show legend for the first subplot
-        ax.legend()
-    ax.grid(True)
+    # Add Model 1 min-max fill
+    fig_r2.add_trace(
+        go.Scatter(
+            x=list(range(len(r2_model1[i]))) + list(range(len(r2_model1[i])))[::-1],
+            y=np.concatenate(
+                [
+                    r2_model1[i].min() * np.ones_like(r2_model1[i]),
+                    r2_model1[i].max() * np.ones_like(r2_model1[i])[::-1],
+                ]
+            ),
+            fill="toself",
+            fillcolor="rgba(0, 0, 255, 0.1)",
+            line=dict(color="rgba(255, 255, 255, 0)"),
+            name="Model 1 Range" if i == 0 else None,
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
 
-plt.tight_layout()
-plt.show()
+    # Add Model 2 traces
+    fig_r2.add_trace(
+        go.Scatter(
+            x=list(range(len(r2_model2[i]))),
+            y=r2_model2[i],
+            mode="lines",
+            name="Model 2" if i == 0 else None,
+            line=dict(color="red"),
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
+
+    # Add Model 2 min-max fill
+    fig_r2.add_trace(
+        go.Scatter(
+            x=list(range(len(r2_model2[i]))) + list(range(len(r2_model2[i])))[::-1],
+            y=np.concatenate(
+                [
+                    r2_model2[i].min() * np.ones_like(r2_model2[i]),
+                    r2_model2[i].max() * np.ones_like(r2_model2[i])[::-1],
+                ]
+            ),
+            fill="toself",
+            fillcolor="rgba(255, 0, 0, 0.1)",
+            line=dict(color="rgba(255, 255, 255, 0)"),
+            name="Model 2 Range" if i == 0 else None,
+            showlegend=i == 0,
+        ),
+        row=row,
+        col=col,
+    )
+
+fig_r2.update_layout(
+    title="R² by Altitude Level", height=800, width=1200, showlegend=True
+)
+
+# Update x and y axis labels
+for i in range(1, 7):
+    fig_r2.update_xaxes(
+        title_text="Altitude Level", row=(i - 1) // 3 + 1, col=(i - 1) % 3 + 1
+    )
+    fig_r2.update_yaxes(title_text="R²", row=(i - 1) // 3 + 1, col=(i - 1) % 3 + 1)
+
+fig_r2.show()
 
 # %% Print average metrics
 print("Model 1 Average Metrics:")
