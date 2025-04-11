@@ -19,6 +19,7 @@ class Base(pl.LightningModule, ABC):
         out_channels=6,
         transport_loss_weight=1.0,
         settling_velocities=None,
+        scaled_loss=True,
         include_coordinates=True,
         use_physics_loss=False,
         use_mass_conservation_loss=False,
@@ -160,6 +161,17 @@ class Base(pl.LightningModule, ABC):
         mmr_true = true[:, :, :-2, :, :]
         dry_dep_true = true[:, :, -2, :, :]
         wet_dep_true = true[:, :, -1, :, :]
+
+        if not self.hparams.scaled_loss:
+            mmr_loss = F.mse_loss(mmr_pred, mmr_true)
+            deposition_loss = F.mse_loss(dry_dep_pred, dry_dep_true) + F.mse_loss(
+                wet_dep_pred, wet_dep_true
+            )
+            return {
+                "total": mmr_loss + deposition_loss,
+                "mmr": mmr_loss,
+                "deposition": deposition_loss,
+            }
 
         # Altitude weights
         # Decrease exponentially as altitude increases
