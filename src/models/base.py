@@ -174,23 +174,30 @@ class Base(pl.LightningModule, ABC):
             }
 
         # Altitude weights
-        # Decrease exponentially as altitude increases
-        # From 2 at the surface to 1 at the top
         alt_dim = mmr_pred.shape[2]
         weights = torch.exp(-torch.arange(alt_dim, device=pred.device) * 0.5)
-        weights = 1 + (weights - weights.min()) / (weights.max() - weights.min())
+
+        if self.hparams.loss_version == 0:
+            # Scale MMR from 2 at surface to 1 at top
+            weights = 1 + (weights - weights.min()) / (weights.max() - weights.min())
+            # Scale the deposition so that it's more important than higher altitudes mmr
+            deposition_weight = 2.0
+        else:  # self.hparams.loss_version == 1
+            # Scale MMR from 1 at surface to 0.5 at top
+            weights = 0.5 + 0.5 * (weights - weights.min()) / (
+                weights.max() - weights.min()
+            )
+            deposition_weight = 1.0
+
         weights = weights.view(1, 1, -1, 1, 1)
 
         # Apply weights to squared differences
-        # logger.debug(
-        #     f"mmr_pred.shape: {mmr_pred.shape}, mmr_true.shape: {mmr_true.shape}"
-        # )
         mmr_squared_diff = (mmr_pred - mmr_true) ** 2
         mmr_weighted_squared_diff = mmr_squared_diff * weights
         mmr_loss = mmr_weighted_squared_diff.mean()
 
-        # Apply weight of 2 to depositions (because it's more important than higher altitudes mmr)
-        deposition_loss = 2.0 * (
+        # Apply weight to depositions
+        deposition_loss = deposition_weight * (
             F.mse_loss(dry_dep_pred, dry_dep_true)
             + F.mse_loss(wet_dep_pred, wet_dep_true)
         )
