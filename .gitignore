@@ -32,7 +32,6 @@ results/
 *.pkl.tar
 *.pkl.gz
 
-*.png
 *.jpg
 *.jpeg
 *.gif

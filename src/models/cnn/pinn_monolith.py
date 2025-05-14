@@ -26,7 +26,7 @@ class CNNPINN(Base):
         self,
         in_channels=5,
         out_channels=6,
-        hidden_channels=[8, 16, 8],  # Lightweight channel configuration
+        hidden_channels=[32, 64, 32],  # Lightweight channel configuration
         kernel_size=3,
         learning_rate=1e-3,
         weight_decay=1e-5,
