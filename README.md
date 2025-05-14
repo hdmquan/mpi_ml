@@ -24,26 +24,28 @@ Final output shape:
 ### Traditional Loss (MSE with Altitude Weighting)
 
 Let:
-- $\hat{M}_{ijk}$ be predicted MMR, $M_{ijk}$ true MMR
+- $\hat{M}\_{ijk}$ be predicted MMR, $M_{ijk}$ true MMR
 - $\hat{D}^{\text{dry}}$, $\hat{D}^{\text{wet}}$ be predicted depositions
 - $D^{\text{dry}}$, $D^{\text{wet}}$ true depositions
 
 Total loss: 
 
-$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{mmr}} + w_d \cdot \mathcal{L}_{\text{dep}}$
-
+$$
+\mathcal{L}\_{\text\{total\}} = \mathcal{L}\_{\text\{mmr\}} + w\_d \cdot \mathcal{L}\_{\text\{dep\}}
+$$
 
 Where:
 
-$
-\mathcal{L}_{\text{mmr}} = \frac{1}{N} \sum_{ijk} w_i \left( \hat{M}_{ijk} - M_{ijk} \right)^2
-$
+$$
+\mathcal{L}\_{\text\{mmr\}} = \frac{1}{N} \sum\_{ijk} w\_i \left( \hat{M}\_{ijk} - M\_{ijk} \right)^2
+$$
+
 
 and
 
-$
+$$
 \mathcal{L}_{\text{dep}} = \text{MSE}(\hat{D}^{\text{dry}}, D^{\text{dry}}) + \text{MSE}(\hat{D}^{\text{wet}}, D^{\text{wet}})
-$
+$$
 
 Where altitude weights $w_i \in [1.0, 2.0]$ scale the surface more heavily than upper levels, since higher altitudes are noisier and less relevant.
 
@@ -78,6 +80,7 @@ This encourages physical consistency of the predicted 3D fields with expected tr
 | Normal MSE             | ✗          | 0.012495  | 0.086416  | 0.327048  |
 |                        | ✓          | 0.012650  | 0.085926  | 0.352221  |
  
+
 
 ---
 
