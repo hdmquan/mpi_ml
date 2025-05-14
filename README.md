@@ -19,7 +19,7 @@ Final output shape:
 
 ---
 
-## 🧪 Loss Functions
+## Loss Functions
 
 ### Traditional Loss (MSE with Altitude Weighting)
 
