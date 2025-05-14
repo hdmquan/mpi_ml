@@ -34,11 +34,13 @@ $$
 \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{mmr}} + w_d \cdot \mathcal{L}_{\text{dep}}
 $$
 
+Where:
 
 $$
 \mathcal{L}_{\text{mmr}} = \frac{1}{N} \sum_{ijk} w_i \left( \hat{M}_{ijk} - M_{ijk} \right)^2
 $$
 
+and
 
 $$
 \mathcal{L}_{\text{dep}} = \text{MSE}(\hat{D}^{\text{dry}}, D^{\text{dry}}) + \text{MSE}(\hat{D}^{\text{wet}}, D^{\text{wet}})
