@@ -34,15 +34,17 @@ $$
 \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{mmr}} + w_d \cdot \mathcal{L}_{\text{dep}}
 $$
 
+
 $$
 \mathcal{L}_{\text{mmr}} = \frac{1}{N} \sum_{ijk} w_i \left( \hat{M}_{ijk} - M_{ijk} \right)^2
 $$
+
 
 $$
 \mathcal{L}_{\text{dep}} = \text{MSE}(\hat{D}^{\text{dry}}, D^{\text{dry}}) + \text{MSE}(\hat{D}^{\text{wet}}, D^{\text{wet}})
 $$
 
-Where altitude weights $w_i \in [0.5, 2.0]$ scale the surface more heavily than upper levels, since higher altitudes are noisier and less relevant.
+Where altitude weights $w_i \in [1.0, 2.0]$ scale the surface more heavily than upper levels, since higher altitudes are noisier and less relevant.
 
 ---
 
